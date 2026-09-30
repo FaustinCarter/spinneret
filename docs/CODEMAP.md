@@ -20,9 +20,9 @@ chargecell/
   analysis/decide.py   quality gate + ensemble + FOUND gates -> decision, keypoints, overlays
   analysis/lattice.py  transition-line lattice from occupancy / line maps
   analysis/recommend.py next-scan guidance, safety, device history, spectator check
-  importers/spinqick_nc.py  spinQICK netCDF reader (+ mock writer for tests)
-  importers/generic.py load_any(): .nc/.npz/.json/.csv dispatch
-  export.py            next-scan JSON and spinQICK script
+  importers/generic.py load_any(): .json (protocol request or plain)/.npz/.csv dispatch
+  protocol.py          chargecell/1 request/response models, analysis -> response, handlers
+  client.py            stdlib-only HTTP client and request builder for measurement code
   virtual.py           practice devices; closed-loop navigation evaluation
   jobs.py              background JobManager (one worker thread)
   server/app.py        FastAPI app (create_app) behind the GUI
@@ -62,7 +62,7 @@ scripts/               train_starter, eval_model, nav_trace, gui_check
 
 ### Scan (`schema.Scan`, dataclass)
 `signal, x, y, x_gate, y_gate, id, device, cooldown, kind ("PvP"), voltage_state (gate -> V),
-fast_axis ("y" for spinQICK gvg_dc), source (file|spinqick|synthetic|virtual_device), created,
+fast_axis (inner sweep loop), source (file|api|synthetic|virtual_device), created,
 units, notes, extra`. `meta()` / `from_meta()` round-trip through `meta.json`.
 Practice-device scans keep ground truth in `extra["truth"]` (status, reason, target_V,
 spectator_occupancy). The server strips it from `GET /api/scans/{id}` and serves it only via
@@ -219,12 +219,20 @@ beats exploration. The window is 3.2 cells (never shrunk on an unmeasured spacin
 `max_step` (reported window = first step, target = final). Windows are kept inside safe limits.
 Reason-specific fixes apply for UNINTERPRETABLE.
 
-### importers, export
-See RESEARCH_NOTES §3 for the spinQICK file layout and API facts the code relies on.
+### importers
 `load_any(path, content=None, meta=None)` accepts bytes for uploads; `meta.axis_units = "mV"`
-scales axes to V. `spinqick_snippet` reads live DC voltages, asserts they match the recorded
-state (only if recorded), steps with `set_dc_voltage_compensate`, and calls `gvg_dc` with
-relative symmetric ranges and `compensate=<sensor gate>`.
+scales axes to V. A `.json` file with a `scan` object is parsed as a chargecell/1 request.
+
+### protocol.py (chargecell/1, specified in docs/PROTOCOL.md)
+Pydantic models `Request` (`ScanIn`, `Axis`, `EncodedArray`, `Label`, `Options`) and
+`Response` (`Feature`, `ScanStep`, `Window`). Request models forbid unknown fields; ids,
+device and cooldown names are restricted to `[A-Za-z0-9._-]` because they become paths.
+`response_from_analysis(analysis, cfg)` maps statuses to outcomes: FOUND -> `found`;
+NOT_IN_WINDOW with guidance confidence high/medium -> `next_scan`; everything else ->
+`no_confident_step` with a `suggestion`. `handle_analyze` and `handle_submit` are shared by
+the HTTP API and the CLI. Only `ANALYSABLE_KINDS` (PvP) are analysed; other kinds are stored,
+and `model/dataset.real_arrays` skips them. **Change the protocol additively** (new optional
+fields, enum values) or bump to chargecell/2.
 
 ### virtual.py
 Practice devices use plungers P1, P2, P3 (dots 0, 1, 2). `create` starts at a random offset
@@ -246,8 +254,10 @@ window centre, and stores the truth. `evaluate_navigation` starts from a 90 mV, 
 | POST | `/api/scans/{id}/draft_from_model` | annotation draft from the model |
 | GET | `/api/label_queue` | unlabelled scans, most uncertain first |
 | POST/GET | `/api/scans/{id}/analyze`, `/analysis` | run / fetch analysis (404 if none) |
-| GET | `/api/scans/{id}/export/next_scan.json?window=next_window|tiebar_window` | JSON export |
-| GET | `/api/scans/{id}/export/spinqick.py?window=...` | spinQICK script |
+| GET | `/api/v1/scans/{id}/response?download=` | saved analysis as a chargecell/1 response |
+| POST | `/api/v1/analyze` | chargecell/1 request -> response (422 invalid, 409 no model) |
+| POST | `/api/v1/scans` | store a scan (+ optional label) as training data |
+| GET | `/api/v1/schema` | JSON Schemas of request and response |
 | POST | `/api/analyze_all?only_new=true` | job |
 | GET / PUT | `/api/devices`, `/api/devices/{name}` | device configs (validated by pydantic) |
 | GET/POST | `/api/synthetic` | list / generate (job) |
@@ -288,9 +298,11 @@ numerals.
 - `conftest.py`: `OracleAnalyzer` (perfect predictions from simulator truth; re-renders
   practice-device scans noise-free), fixtures `ws` and `oracle_analyzer` (monkeypatches
   `Analyzer.get`).
-- `test_core.py`: simulator, label round trip, unknown offsets, spinQICK import (analysed and
-  raw), generic importers, snippet.
+- `test_core.py`: simulator, label round trip, unknown offsets, generic importers.
 - `test_guidance.py`: decisions and targets with perfect perception, safety limits and step
-  splitting, closed-loop navigation.
+  splitting, closed-loop navigation, confidence downgrade for stacked indexed lines.
+- `test_protocol.py`: request forms and validation, a practice device driven to (1,1) purely
+  through `/api/v1/analyze` (via `chargecell.client`), training submission, errors, CLI file
+  mode.
 - `test_api.py`: the whole GUI workflow over HTTP; training smoke test (48 scans, 32 px,
   1 epoch).

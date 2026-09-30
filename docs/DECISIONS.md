@@ -19,8 +19,11 @@ Each entry: the decision, why, and what would change it. Newest last.
    "where to go". Outputs can be checked against physics (lattice fits, cell size, edge contact),
    and guidance logic can be tested on its own with ground truth (OracleAnalyzer).
 
-5. **Own physics simulator; spinQICK for real I/O.** spinQICK has no simulator. The simulator
-   models what the HRL papers show matters: strong tunnel coupling, a sensor dot that drifts off
+5. **Own physics simulator; a backend-neutral protocol for real I/O.** spinQICK was first
+   planned for synthetic data, but it has no simulator. It was then used for netCDF import and a
+   generated next-scan script, and was later removed at the user's request (2026-09-30) in favour
+   of the chargecell/1 JSON protocol (`docs/PROTOCOL.md`), which any control stack can speak.
+   ChargeCell stays free of instrument code. The simulator models what the HRL papers show matters: strong tunnel coupling, a sensor dot that drifts off
    its flank, spectator lines, and 1/f and telegraph noise.
 
 6. **No foundation models.** SAM, large pretrained backbones, and VLMs were considered. The
@@ -40,9 +43,10 @@ Each entry: the decision, why, and what would change it. Newest last.
    labelling effort goes where the model is weakest.
 
 10. **Advisory by default, with safety in the guidance itself.** Recommendations never leave
-    the safe limits, and moves larger than `max_step` are split. The spinQICK script asserts the
-    live DC point matches the analysed scan and must be read before running. Closed-loop
-    control is an open question (HANDOFF Q6).
+    the safe limits, and moves larger than `max_step` are split. Protocol responses carry
+    `max_step` so a backend can ramp safely. ChargeCell never moves gates itself. The user chose
+    to keep it advisory (2026-09-30): an automated loop lives in the backend, which should hand
+    `needs_review` and `no_confident_step` results to a person.
 
 11. **All guidance geometry in the model's index space**, converted to volts at the end, so
     hole devices and reversed sweeps need no special cases.

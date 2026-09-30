@@ -44,30 +44,11 @@ publication and open-source plans may change.
 - Per-pixel segmentation (U-Net) trained on simulations, with ensemble disagreement for
   abstention.
 
-## 3. spinQICK facts (from its source, github.com/HRL-Laboratories/spinqick)
+## 3. spinQICK (not used)
 
-Checked by cloning the repository in September 2026. **Re-verify against the user's installed
-version.**
-
-- **No device simulator.** The only "simulation" is MESA forecasting. Synthetic training data
-  cannot come from spinQICK.
-- `TuneElectrostatics.gvg_dc(g_gates=(['P1'], ['P2']), g_range=((x0, x1, nx), (y0, y1, ny)),
-  measure_buffer, compensate='M1')`. Ranges are **relative to the present DC point**; **y is
-  the fast (inner) axis**. `gvg_baseband` takes absolute ranges.
-- `vdc.set_dc_voltage(volts, gate)` sets a DC voltage (no ramp; checks `max_v`).
-- `vdc.set_dc_voltage_compensate(volts, gates, iso_gates)` takes **absolute** target volts. It
-  computes deltas from `get_dc_voltage`, solves the compensation with the cross-coupling matrix
-  from the hardware config (raises if that matrix is missing), and sets all gates.
-- `retune_dcs(m_dot, m_range, measure_buffer, set_v)` retunes the sensor; `tune_mz` also exists.
-- **netCDF layout** (`SpinqickData.save_data`, filename `<unix timestamp><experiment_name>.nc`):
-  - root attributes: `timestamp` (unix seconds, int), `experiment_name` (e.g. `_gvg_dc`),
-    `cfg` (JSON), `cfg_type`, `spinqick_version`, `voltage_state` (JSON gate -> V);
-  - group `swept_variables/x`, `swept_variables/y`: one variable per swept gate (volts) with
-    attributes `ax_dim` and `loop_no` (the higher loop_no is the inner/fast loop); dimensions
-    `x_dim`, `y_dim` are created at the **root**;
-  - `raw_data_0`: dims (reps, triggers, [avgs], x, y, IQ);
-  - `analyzed_data/analyzed_0`: dims (reps, triggers, x, y), with a `units` attribute;
-  - data are indexed **[..., x, y]**. ChargeCell stores (y, x).
-- `load_spinqick_nc` prefers analysed data, falls back to |IQ| of raw data, averages all
-  non-x/y dimensions, and imports multi-gate (virtual) axes using the first gate's voltages
-  (the others go into `extra`).
+spinQICK (github.com/HRL-Laboratories/spinqick), checked in September 2026, has **no device
+simulator**; its only "simulation" is MESA forecasting. It therefore cannot generate synthetic
+training data. An early version of ChargeCell imported spinQICK netCDF files and exported
+spinQICK scripts; both were removed in favour of the backend-neutral chargecell/1 protocol
+(`docs/PROTOCOL.md`). A spinQICK user can send its scans through the protocol like any other
+backend.

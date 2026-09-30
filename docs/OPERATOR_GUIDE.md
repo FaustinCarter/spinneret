@@ -11,8 +11,9 @@ better model" below). This takes a while on a laptop; it only has to be done onc
 ## The daily loop
 
 1. Take a plunger-vs-plunger scan (for example P1 vs P2) the way you normally do.
-2. Import it: **Scans → Import files**. spinQICK `.nc` files need nothing else. For other files,
-   type the two gate names and the device and cooldown.
+2. Get it into ChargeCell. If your measurement software is connected (docs/PROTOCOL.md), it
+   arrives on its own. Otherwise use **Scans → Import files**. ChargeCell `.json` request files
+   need nothing else. For other files, type the two gate names, the device and the cooldown.
 3. Open it on **Review** and click **Analyse**.
 4. Read the big coloured word, then the "What to do next" box.
 5. Do what it says, take the new scan, and repeat.
@@ -45,9 +46,9 @@ yourself before acting. These scans are also the most useful ones to label.
 ## Doing the move safely
 
 - **Copy settings** gives you the next window as text.
-- **spinQICK script** downloads a short script. It checks the live DC voltages match the scan,
-  moves the DC point in small steps with sensor compensation, then runs the scan. Open it and read
-  it before running.
+- **Download result (JSON)** saves the result in the format measurement software reads
+  (docs/PROTOCOL.md), so a script can set up the next scan for you. Ramp the gates in steps no
+  larger than the device's step limit.
 - Moves are never larger than the device's step limit and never leave its safe limits (set on the
   Device page). If a move is bigger, ChargeCell tells you to take the first step, rescan, and
   analyse again.

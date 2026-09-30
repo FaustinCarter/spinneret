@@ -13,13 +13,16 @@ Every scan gets one of three outcomes:
 
 It comes with a GUI for people who do not write software: review results, label scans,
 generate synthetic training data, train new model versions, and practise on simulated devices.
+Measurement software talks to it through a small, backend-neutral JSON protocol
+(`docs/PROTOCOL.md`), so it works with any control stack.
 
 ## Install
 
 Python 3.10 or newer.
 
 ```bash
-pip install ./chargecell[spinqick]     # netCDF4 for spinQICK files
+git lfs install                        # once per machine: model weights are stored with Git LFS
+pip install .                          # from a clone of this repository
 chargecell serve                       # opens http://127.0.0.1:8765
 ```
 
@@ -37,10 +40,11 @@ dataset and train a model first (Synthetic data page, then Train page), or run
    **Reveal the true answer** shows whether the call was right.
 2. **Set up your device.** On the Device page enter plunger, sensor and barrier gate names,
    safe voltage limits, the largest step you allow, and a rough addition voltage per plunger.
-3. **Import real scans.** Scans page, **Import files**: spinQICK `.nc` files, or `.npz`, `.json`
-   and `.csv` from elsewhere. Always fill in the cooldown.
-4. **Review and act.** Each scan gets an outcome and next steps. Copy the settings, or download a
-   spinQICK script that steps the DC point safely and runs the next `gvg_dc` scan.
+3. **Bring in real scans.** Either have your measurement code send them (see below), or use
+   Scans page, **Import files**: `.json` (chargecell/1 requests or plain arrays), `.npz` and `.csv`.
+   Always fill in the cooldown.
+4. **Review and act.** Each scan gets an outcome and next steps. Copy the settings, or download
+   the result as JSON for your measurement code.
 5. **Label.** On the Label page, draw the dot boundaries, set the electron counts, choose the
    outcome. The queue shows the scans the model is least sure about first.
 6. **Retrain.** On the Train page, combine synthetic datasets with your labels. Each version is
@@ -48,23 +52,27 @@ dataset and train a model first (Synthetic data page, then Train page), or run
    calls are right at least 97% of the time (configurable). Make a version active when its real-data
    scores beat the previous one.
 
-## spinQICK integration
+## Connecting your measurement setup
 
-spinQICK (HRL Laboratories' open-source QICK-based control software) is used where it fits:
-**reading your measurements and running the next scan.**
+ChargeCell never drives instruments. Your measurement code sends each scan as JSON and gets back
+one of three answers: the (1,1) cell's coordinates (`found`), the next window to scan
+(`next_scan`), or `no_confident_step` with the reason and a suggestion for a person to review.
 
-- **Import:** files written by `SpinqickData.save_data` (e.g. from
-  `TuneElectrostatics.gvg_dc` or `gvg_baseband`) are read directly, including gate names, swept
-  voltages, analysed or raw IQ data, and the recorded DC voltage state.
-- **Export:** the recommended next scan becomes a short script that reads the live DC point, moves
-  in steps no larger than your limit with `vdc.set_dc_voltage_compensate` (sensor compensation),
-  and calls `gvg_dc` with ranges relative to the new DC point. Read it before running it.
+```python
+from chargecell.client import ChargeCellClient
 
-spinQICK does not contain a device simulator, so it cannot generate synthetic training data.
-ChargeCell ships its own physics-based simulator for that (constant-interaction triple dot with
-tunnel coupling, a realistic charge sensor, and measurement artefacts). The importer was written
-against spinQICK's source and tested on files with the same layout; please check it on your own
-files before relying on it.
+cc = ChargeCellClient("http://127.0.0.1:8765")          # a running `chargecell serve`
+r = cc.analyze(signal, x_volts, y_volts, x_gate="P1", y_gate="P2", device="devA",
+               cooldown="CD7", voltage_state={"P3": 0.845, "M1": 0.920})
+print(r["outcome"], r["headline"])
+```
+
+The same JSON works over HTTP from any language (`POST /api/v1/analyze`), or as files
+(`chargecell analyze request.json --json`). Labelled scans can be submitted for training with
+`POST /api/v1/scans`. Full specification: `docs/PROTOCOL.md`.
+
+Synthetic training data come from ChargeCell's own physics-based simulator: a constant-interaction
+triple dot with tunnel coupling, a realistic charge sensor, and measurement artefacts.
 
 ## Command line
 
@@ -72,7 +80,9 @@ files before relying on it.
 chargecell serve                                   # GUI
 chargecell simulate --name sim1 -n 3000 --size 96  # synthetic dataset
 chargecell train --synthetic sim1 --activate       # train and activate a model version
-chargecell analyze scan.nc                         # print outcome and next steps
+chargecell analyze scan.csv --x-gate P1 --y-gate P2  # print outcome and next steps
+chargecell analyze request.json --json            # chargecell/1 request -> response
+chargecell schema                                  # JSON Schema of the protocol
 chargecell navigate --devices 20                   # test guidance on simulated devices
 ```
 
@@ -90,12 +100,13 @@ chargecell navigate --devices 20                   # test guidance on simulated 
   labelling tool, and verification of spectator dots beyond consistency with earlier scans.
 
 More: `docs/OPERATOR_GUIDE.md` (plain-language guide), `docs/DESIGN.md` (how it works),
-`docs/CODEMAP.md` (developer reference), `docs/HANDOFF.md` (status and next steps).
+`docs/PROTOCOL.md` (integration), `docs/CODEMAP.md` (developer reference),
+`docs/HANDOFF.md` (status and next steps).
 
 ## Repository layout
 
 ```
-chargecell/        the package (simulator, model, analysis, importers, server + GUI, CLI)
+chargecell/        the package (simulator, model, analysis, protocol, server + GUI, CLI)
 tests/             pytest suite (oracle-based guidance tests, API workflow, training smoke test)
 scripts/           train_starter, eval_model, nav_trace, gui_check
 docs/              operator guide, design, code map, research notes, decisions, handoff

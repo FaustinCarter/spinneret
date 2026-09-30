@@ -18,7 +18,7 @@ and deterministic code turns those into a decision and a next scan.
 
 ```
 scan file ─► importer ─► quality gate ─► ensemble U-Net ─► consistency checks ─► decision
-  (.nc, .csv, …)          (NaN, flat,      (occupancy A/B,   (threshold, anchors,   │
+  (API, .json, .csv, …)   (NaN, flat,      (occupancy A/B,   (threshold, anchors,   │
                            too small)       lines, status,    cell size, edge)      ▼
                                             reason, anchors)                lattice fit ─► guidance
                                                                             (lines, spacing, tilt)   (move, window,
@@ -27,7 +27,7 @@ scan file ─► importer ─► quality gate ─► ensemble U-Net ─► consi
 
 ## 3. Synthetic data (`chargecell/simulate`)
 
-spinQICK has no simulator, so ChargeCell has its own.
+ChargeCell generates its own training data; no external simulator is needed.
 
 - **Physics.** Constant-interaction triple dot with a gate lever-arm matrix (cross-capacitance
   decays with distance), charging and mutual energies, and interdot tunnel coupling that grows with
@@ -121,17 +121,18 @@ Everything is computed in the model's index grid and converted to volts at the e
   view) and never shrunk on an unmeasured spacing. Points are set to about 12 per addition voltage.
 - **Safety.** Windows are kept inside the device's safe limits. Moves larger than the step limit
   are cut to the limit, and the operator is told to rescan and re-analyse after each step.
-- **Fixes.** For "can't interpret", reason-specific instructions (sensor retune with spinQICK's
-  `retune_dcs`, barrier reduction by a configurable step, longer averaging, more points).
+- **Fixes.** For "can't interpret", reason-specific instructions (sensor retune, barrier
+  reduction by a configurable step, longer averaging, more points).
 - **Spectators.** A pairwise scan cannot show the third dot's occupancy. ChargeCell checks
   whether an earlier FOUND scan that swept the spectator's plunger contains its present voltage,
   and says so. This ignores cross-talk from gates moved since, so it is a consistency check only.
 
 ## 8. Evaluation
 
-- **Unit and integration tests** (`pytest`): simulator consistency, label round trip, importers
-  (including spinQICK's netCDF layout, both analysed and raw-IQ files), exporter, the full HTTP
-  workflow the GUI uses, and a training smoke test.
+- **Unit and integration tests** (`pytest`): simulator consistency, label round trip, file
+  importers, the chargecell/1 protocol (parsing, HTTP, file mode, a practice device driven to
+  (1,1) through the protocol alone), the full HTTP workflow the GUI uses, and a training smoke
+  test.
 - **Guidance with perfect perception** (`tests/test_guidance.py`, using ground truth in place of
   the network): >90% outcome agreement, anchored targets within 0.3 cell spacings (median),
   >80% correct move direction when unanchored, and closed-loop navigation on 30 random devices:
@@ -156,6 +157,6 @@ navigation. Record the results here.
   same labelling and training pipeline.
 - The labelling tool assumes electron orientation (occupancy grows with voltage). Analysis supports
   hole devices; labelling them needs a flipped drawing convention.
-- The spinQICK importer and script were written against spinQICK's source and tested on files with
-  the same layout, not on files from a real setup.
+- The chargecell/1 protocol has only been exercised by the tests and practice devices, not yet by
+  a real measurement backend.
 - Spectator verification is a consistency check against earlier scans, not a measurement.
