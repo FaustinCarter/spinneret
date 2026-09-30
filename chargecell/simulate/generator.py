@@ -146,12 +146,15 @@ def sample_window(rng, p: DeviceParams, intent: str, pair=None, coarse: bool = F
         cy = cb - 0.5 * dvb - eb * dvb + wy / 2 + rng.normal(0, 0.08) * dvb
     elif rng.random() < 0.3:
         # near the target, where guidance ends up: (1,1) in view or one electron away, with
-        # too little of the empty region to count from (the easiest place to miscount)
-        wx, wy = rng.uniform(2.2, 4.0) * dva, rng.uniform(2.2, 4.0) * dvb
+        # too little of the empty region to count from (the easiest place to miscount), up to
+        # the 1.5x zoomed-out windows that follow a held-back FOUND
+        wx, wy = rng.uniform(2.2, 6.0) * dva, rng.uniform(2.2, 6.0) * dvb
         cx = ca + rng.uniform(-1.6, 1.6) * dva
         cy = cb + rng.uniform(-1.6, 1.6) * dvb
     else:
-        wx, wy = rng.uniform(0.8, 4.5) * dva, rng.uniform(0.8, 4.5) * dvb
+        # a fifth are wide survey windows, as after repeated zooming out
+        hi = 8.0 if rng.random() < 0.2 else 4.5
+        wx, wy = rng.uniform(0.8, hi) * dva, rng.uniform(0.8, hi) * dvb
         cx = ca + rng.uniform(-4.0, 5.0) * dva
         cy = cb + rng.uniform(-4.0, 5.0) * dvb
     # spectator mostly holds one electron; sometimes 0 or 2 (the "unverified spectator" case)

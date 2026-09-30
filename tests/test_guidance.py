@@ -17,15 +17,42 @@ def _scan_from_sample(s, device="sim"):
                 voltage_state={g[w.spectator]: w.v_spectator / 1e3})
 
 
+def _anchored_sample(rng):
+    """A window with the empty region and first transitions of both dots in view, but the
+    (1,1) cell cut off by the upper window edges: NOT_IN_WINDOW with both dots anchored, the
+    case where guidance can compute the target (rare in the generator's own mixture)."""
+    from chargecell.simulate.generator import (Window, oracle, render, sample_artifacts,
+                                               sample_device)
+    while True:
+        p = sample_device(rng, "mixed")
+        a, b = (int(v) for v in rng.permutation(3)[:2])
+        c = ({0, 1, 2} - {a, b}).pop()
+        dva, dvb = p.addition_voltage(a), p.addition_voltage(b)
+        ca, cb = p.v11[a], p.v11[b]
+        x0 = ca - 0.5 * dva - rng.uniform(1.5, 2.2) * dva
+        y0 = cb - 0.5 * dvb - rng.uniform(1.5, 2.2) * dvb
+        x1 = ca + rng.uniform(-0.35, 0.1) * dva
+        y1 = cb + rng.uniform(-0.35, 0.1) * dvb
+        nx, ny = int((x1 - x0) / dva * 20), int((y1 - y0) / dvb * 20)
+        w = Window(pair=(a, b), x0=x0, x1=x1, y0=y0, y1=y1, nx=nx, ny=ny,
+                   v_spectator=float(p.v11[c]), fast_axis="y")
+        art = sample_artifacts(rng, "normal")
+        art.snr_target, art.jumps = 20.0, []
+        rend = render(p, w, art, rng)
+        t = oracle(p, w, art, rend)
+        if t["status"] == schema.NOT_IN_WINDOW and t["ref_a"] and t["ref_b"]:
+            return dict(params=p, window=w, artifacts=art, render=rend, truth=t)
+
+
 def test_decisions_and_targets_with_perfect_perception(ws, oracle_analyzer):
     rng = np.random.default_rng(5)
     agree, n, anchored_err, direction_ok, direction_n = 0, 0, [], 0, 0
-    for k in range(400):
+    for k in range(120):
         if k >= 60 and len(anchored_err) >= 10:
             break
-        # after the first 60 (the default outcome mix), draw only NOT_IN_WINDOW windows until
-        # there are enough anchored (high-confidence) targets to judge
-        s = generate_sample(rng) if k < 60 else generate_sample(rng, mix=(0, 1, 0))
+        # after the first 60 (the default outcome mix), windows with both dots anchored but
+        # (1,1) cut off, until there are enough high-confidence targets to judge
+        s = generate_sample(rng) if k < 60 else _anchored_sample(rng)
         t = s["truth"]
         scan = _scan_from_sample(s)
         # an operator's rough prior for this device (+-30%), as for a new device of a known type
