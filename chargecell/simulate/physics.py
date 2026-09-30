@@ -150,11 +150,21 @@ def detuning(p: DeviceParams, V: np.ndarray, offset: np.ndarray | None = None) -
     return (off if off.ndim == 2 else off[None, :]) - V @ p.lever.T
 
 
-def classical_ground_state(p: DeviceParams, V: np.ndarray, offset=None) -> np.ndarray:
+def classical_ground_state(p: DeviceParams, V: np.ndarray, offset=None,
+                           nmax: int | None = None) -> np.ndarray:
     """T=0, t=0 ground state occupations (P,3). Cheap; used for geometry/oracle labels.
-    ``offset`` may be (3,) or per pixel (P,3)."""
+    ``offset`` may be (3,) or per pixel (P,3). ``nmax`` searches only states with at most that
+    many electrons per dot (faster for windows near few-electron cells); the result is exact:
+    the energy is convex in the occupations, so if any pixel reaches ``nmax`` the full search is
+    done instead."""
     E0, _ = _precompute(p)
     eps = detuning(p, V, offset)
+    if nmax is not None and nmax < NMAX:
+        keep = (STATES <= nmax).all(1)
+        st = STATES[keep]
+        g = st[np.argmin(E0[keep][None, :] + eps @ st.T.astype(float), axis=1)]
+        if not (g == nmax).any():
+            return g
     E = E0[None, :] + eps @ STATES.T.astype(float)
     return STATES[np.argmin(E, axis=1)]
 

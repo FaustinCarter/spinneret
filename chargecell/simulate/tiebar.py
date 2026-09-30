@@ -71,7 +71,7 @@ def _raster_tps(p: DeviceParams, pair, v_spec: float, centre, lo0, hi0, n: int =
     X, Y = np.meshgrid(xs, ys)
     V = np.zeros((n * n, 3))
     V[:, a], V[:, b], V[:, c] = X.ravel(), Y.ravel(), v_spec
-    g = classical_ground_state(p, V).reshape(n, n, 3)
+    g = classical_ground_state(p, V, nmax=3).reshape(n, n, 3)
     na, nb = g[..., a], g[..., b]
     near = lambda i, j: ndimage.maximum_filter(((na == i) & (nb == j)).astype(np.uint8), 3) > 0
     r11, r20 = near(1, 1), near(2, 0)
