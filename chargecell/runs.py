@@ -173,6 +173,15 @@ def _children(run: dict, node_id: str, type_: str | None = None) -> list[dict]:
                    and (type_ is None or n["type"] == type_)), key=lambda n: n["seq"])
 
 
+def _kids(run: dict):
+    """Children lookup built once (runs can hold thousands of nodes): kids(id, type=None)."""
+    index = defaultdict(list)
+    for n in sorted(run["nodes"], key=lambda n: n["seq"]):
+        index[n["parent"]].append(n)
+    return lambda node_id, type_=None: [n for n in index.get(node_id, ())
+                                        if type_ is None or n["type"] == type_]
+
+
 def _last(run: dict, type_: str) -> dict | None:
     nodes = [n for n in run["nodes"] if n["type"] == type_]
     return max(nodes, key=lambda n: n["seq"]) if nodes else None
@@ -456,14 +465,15 @@ def record_review(ws: Workspace, scan_id: str, annotation: dict) -> dict | None:
 def _regrade(run: dict) -> None:
     """Grade stages and the run from their nodes (measures, analyses and advice are graded when
     they are recorded)."""
-    stages = _children(run, "n0", "stage")
+    kids = _kids(run)
+    stages = kids("n0", "stage")
     for i, st in enumerate(stages):
-        measures = _children(run, st["id"], "measure")
+        measures = kids(st["id"], "measure")
         found_at, wrong, corrected, trailing = None, False, False, 0
         for k, m in enumerate(measures, 1):
-            an = (_children(run, m["id"], "analysis") or [None])[-1]
-            adv = (_children(run, m["id"], "advice") or [None])[-1]
-            rv = (_children(run, m["id"], "review") or [None])[-1]
+            an = (kids(m["id"], "analysis") or [None])[-1]
+            adv = (kids(m["id"], "advice") or [None])[-1]
+            rv = (kids(m["id"], "review") or [None])[-1]
             if an is not None and an["data"]["status"] == schema.FOUND and found_at is None:
                 if an["grade"] == "fail":
                     wrong = True
@@ -524,7 +534,8 @@ def stats(ws: Workspace, device: str | None = None, source: str | None = None) -
         run = load(ws, r["id"])
         if run is None:
             continue
-        for st in _children(run, "n0", "stage"):
+        kids = _kids(run)
+        for st in kids("n0", "stage"):
             kind = st["data"].get("kind", "PvP")
             pk = per_kind[kind]
             pk["stages"] += 1
@@ -535,14 +546,14 @@ def stats(ws: Workspace, device: str | None = None, source: str | None = None) -
             if outcome == "reached":
                 pk["scans_to_goal"].append(st["data"]["found_at"])
             last = None
-            for m in _children(run, st["id"], "measure"):
+            for m in kids(st["id"], "measure"):
                 if m["data"].get("followed"):
                     followed[m["data"]["followed"]] += 1
-                for an in _children(run, m["id"], "analysis"):
+                for an in kids(m["id"], "analysis"):
                     last = an
                     if an["grade"] in ("warn", "fail"):
                         failures[(kind, an["data"]["status"], an["data"]["reason"])] += 1
-                for rv in _children(run, m["id"], "review"):
+                for rv in kids(m["id"], "review"):
                     reviews["agree" if rv["data"]["agrees"] else "disagree"] += 1
             if outcome not in ("reached", "open") and last is not None:
                 stalls[(kind, last["data"]["status"], last["data"]["reason"])] += 1

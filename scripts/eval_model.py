@@ -25,7 +25,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from chargecell import kinds, schema, virtual  # noqa: E402
+from chargecell import kinds, runs, schema, virtual  # noqa: E402
 from chargecell.analysis.decide import analyze  # noqa: E402
 from chargecell.config import DeviceConfig  # noqa: E402
 from chargecell.schema import Scan  # noqa: E402
@@ -77,6 +77,11 @@ def main():
             print(" ", x["device"], "scans:", x["scans"], "correct:", x["correct"],
                   [(t["status"][:5], t["reason"], t["truth"][:5], t["truth_reason"])
                    for t in x["trail"]])
+        # the closed loops are recorded as runs of the automation tree: where did they stall?
+        st = runs.stats(ws, source="practice")
+        print("STALLS", json.dumps(st["stall_points"]))
+        print("FLAGGED", json.dumps(st["failure_modes"][:8]))
+        print(f"(runs kept in {ws.root}; `chargecell -w {ws.root} runs <id>` prints one)")
 
 
 def held_out_scan(kind: str, rng) -> tuple[Scan, dict]:
