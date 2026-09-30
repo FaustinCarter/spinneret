@@ -25,6 +25,11 @@ generate synthetic training data, train new model versions, and practise on simu
 Measurement software talks to it through a small, backend-neutral JSON protocol
 (`docs/PROTOCOL.md`), so it works with any control stack.
 
+Every analysed scan is also recorded in an **automation tree**, as in HRL's tune-up software: each
+run of a tune-up is a tree of scans, conclusions, advice and reported actions, graded as they
+happen, so a long unattended run can be audited afterwards and many runs can be compared (scans
+needed per goal, where runs stall, which problems come up most).
+
 ## Install
 
 Python 3.10 or newer.
@@ -58,7 +63,9 @@ kind, trained on simulated scans) are installed on first start. To rebuild them:
 5. **Label.** On the Label page, draw the dot boundaries, set the electron counts, choose the
    outcome (plunger-vs-plunger scans for now). The queue shows the scans the model is least
    sure about first.
-6. **Retrain.** On the Train page, pick a scan kind and combine synthetic datasets with your
+6. **Audit.** The Runs page shows each tune-up as a graded tree: every scan, what ChargeCell
+   concluded and advised, whether the next scan followed the advice, and where it got stuck.
+7. **Retrain.** On the Train page, pick a scan kind and combine synthetic datasets with your
    labels. Each version is scored on held-out cooldowns it never saw, and its FOUND threshold is
    calibrated so that FOUND calls are right at least 97% of the time (configurable). Make a
    version active when its real-data scores beat the previous one.
@@ -81,7 +88,10 @@ r = cc.analyze(signal, p1_volts, t1_volts, x_gate="P1", y_gate="T1", kind="PvT",
 
 The same JSON works over HTTP from any language (`POST /api/v1/analyze`), or as files
 (`chargecell analyze request.json --json`). Labelled scans can be submitted for training with
-`POST /api/v1/scans`. Full specification: `docs/PROTOCOL.md`.
+`POST /api/v1/scans`. To group a tune-up into one run of the automation tree, start a run and
+pass its id (`cc.start_run(...)`, `analyze(..., run_id=...)`), report what your code does between
+scans (`cc.log(...)`) and close it (`cc.close_run(...)`); without a run id, scans join their
+device's open run. Full specification: `docs/PROTOCOL.md`.
 
 Synthetic training data come from ChargeCell's own physics-based simulator: a constant-interaction
 triple dot with tunnel coupling, a realistic charge sensor, reservoir tunnel rates set by the
@@ -97,6 +107,7 @@ chargecell analyze scan.csv --x-gate P1 --y-gate P2             # print outcome 
 chargecell analyze request.json --json                          # chargecell/1 request -> response
 chargecell schema                                               # JSON Schema of the protocol
 chargecell navigate --devices 20                                # test guidance on simulated devices
+chargecell runs                                                 # tune-up runs; `runs <id>` prints one, --stats
 ```
 
 ## What is validated, and what is not
@@ -110,7 +121,7 @@ More: `docs/OPERATOR_GUIDE.md` (plain-language guide), `docs/DESIGN.md` (how it 
 ## Repository layout
 
 ```
-chargecell/        the package (simulators, models, analysis per scan kind, protocol, server + GUI, CLI)
+chargecell/        the package (simulators, models, analysis per scan kind, protocol, automation tree, server + GUI, CLI)
 tests/             pytest suite (oracle-based guidance tests, API workflow, training smoke tests)
 scripts/           train_starter, eval_model, nav_trace, gui_check
 docs/              operator guide, design, protocol, code map, research notes, decisions, handoff

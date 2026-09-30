@@ -118,7 +118,11 @@ FOUND requires **all** of:
 4. at most 40% of that region's border is the window edge (not cut off);
 5. the empty region is at least 1.3 electron spacings wide for both dots, measured on the
    occupancy map against the 0→1 / 1→2 spacing in the same map (a geometric check that does not
-   trust the anchor heads).
+   trust the anchor heads);
+6. the network's own line map agrees that the empty region is empty: no column (for dot A; row
+   for dot B) of its interior, away from the edge, has a mean line probability of that dot's
+   family above 0.22. A faint first transition that the occupancy map missed would otherwise
+   make every count one too high.
 
 Otherwise the result is demoted and flagged for review. A demoted scan becomes "can't
 interpret" only if the network gives that more than 50%: FOUND and "not in window" both mean
@@ -150,14 +154,16 @@ Everything is computed in the model's index grid and converted to volts at the e
   shifted toward the empty region so that more than a full cell of it is in view, and are never
   shrunk on an unmeasured spacing. Points are set to about 12 per addition voltage.
 - **No circles.** A window that was already scanned without success is not proposed again: the
-  next scan covers both it and the present window. A window that could not be interpreted twice
-  is widened 1.5x. A large line-free region below the lowest transition is treated as the
-  probable empty region and kept in view.
+  next scan covers both it and the present window. If that is the present window itself (the
+  guidance would rescan what it just saw, typically after a FOUND was held back), the next
+  window is 1.5x wider around the expected cell instead, and the headline says the call was
+  held back. A window that could not be interpreted twice is widened 1.5x. A large line-free
+  region below the lowest transition is treated as the probable empty region and kept in view.
 - **Safety.** Windows are kept inside the device's safe limits, when set (a warning says when
   they are not). Moves larger than the step limit (the device's max step, else one window width)
   are cut to the limit, and the operator is told to rescan and re-analyse after each step.
 - **Fixes.** For "can't interpret", reason-specific instructions (sensor retune, barrier
-  reduction by a configurable step, longer averaging, more points).
+  reduction by a configurable step, longer averaging, at least twice the points).
 - **Spectators.** A pairwise scan cannot show the third dot's occupancy. ChargeCell checks
   whether an earlier FOUND scan that swept the spectator's plunger contains its present voltage,
   and says so. This ignores cross-talk from gates moved since, so it is a consistency check only.
@@ -228,7 +234,41 @@ Everything is computed in the model's index grid and converted to volts at the e
 
 (Pending: filled in once the starter models are trained and evaluated.)
 
-## 12. Limitations and next steps
+## 12. Automation tree (`chargecell/runs.py`)
+
+HRL records every action of an automated tune-up as a node of a tree, grades each node when it
+happens, and analyses the trees of many runs for success rates and failure modes (QPU paper,
+S5.3). ChargeCell keeps the same record, within its advisory role: it cannot see what the
+backend does unless told, so the tree holds what ChargeCell was sent, what it answered, and
+what the backend or operator reports (the protocol's run events).
+
+- **Shape.** run → stage (one goal: a kind of scan on a pair of gates) → measure (a scan) →
+  analysis + advice (+ review, a person's label), with action and note nodes for what the
+  backend reports. Children are kept in time order, so a depth-first walk is the order of
+  actions. HRL inserts data collection as children of the action that asked for it; ChargeCell
+  keeps a stage's scans as siblings, which reads more easily and carries the same order.
+- **Grouping.** A backend groups a tune-up with `options.run_id` (or starts a run explicitly).
+  Without it, scans join their device's open run, and a new run starts after 4 hours without
+  scans on that device. A scan starts a new stage when its kind or gate pair changes, or when the
+  backend names a new stage; returning to an earlier goal later is a new stage.
+- **Grades at the time.** Scans: data quality. Analyses: pass, check (the model asked for
+  review), fail (can't interpret; on practice devices also a FOUND the truth shows is wrong).
+  Advice: pass for found or a confident next scan, check for "no confident step". Stages and runs
+  are graded from their children: reached, stalled (3 scans in a row without a confident step),
+  left without reaching the goal, or wrong.
+- **Following the advice.** Each scan records whether its window matches the last advice (both
+  ends within 10% of the advised span on both axes) and which other gates changed since the last
+  scan. This separates "the guidance failed" from "the guidance was not followed".
+- **Statistics across runs.** Per kind: goals reached, median and 90th-percentile scans to the
+  goal, stalled and unfinished goals, wrong FOUNDs on practice devices; the most common failed or
+  flagged analyses; the last analysis of goals that were not reached (where runs stall); advice
+  followed; reviewers' agreement.
+- **Practice devices** record their closed loops as runs, including the fixes the simulated
+  operator applies (gate changes, sensor retune, longer averaging), so the evaluation of a model
+  can be read node by node. Re-analysing a scan with the same model and the same result adds
+  nothing to the tree.
+
+## 13. Limitations and next steps
 
 - The starter models have only seen simulations. Label real scans from at least two cooldowns and
   retrain before trusting them on a new device.
@@ -239,3 +279,5 @@ Everything is computed in the model's index grid and converted to volts at the e
 - The chargecell/1 protocol has only been exercised by the tests and practice devices, not yet by
   a real measurement backend.
 - Spectator verification is a consistency check against earlier scans, not a measurement.
+- The automation tree only knows what it is told: a backend that does not report its own
+  actions (gate changes between scans are inferred from `voltage_state`) leaves gaps.

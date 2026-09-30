@@ -52,11 +52,11 @@ hole-device labelling were not chosen.
 | GUI: kinds, practice per kind, keypoint display | Done; labeller is PvP-only |
 | Starter models bundled (Git LFS) | In progress (PvP retraining; PvT and tie-bar next) |
 | CI (GitHub Actions) | Green on every push this session |
-| Automation tree / audit log | Not started (next on the user's list) |
+| Automation tree / audit log (`runs.py`, Runs page, protocol run endpoints, CLI) | Done, tested |
 
 ## 3. Verified results (reproducible)
 
-- `pytest -q`: 24 tests (about 3 minutes on 4 cores; `test_kinds.py` trains tiny models).
+- `pytest -q`: 28 tests (about 3 minutes on 4 cores; `test_kinds.py` trains tiny models).
 - Guidance with perfect perception, 30 practice devices each (`python scripts/nav_trace.py
   --oracle --bench --kind <kind>`), every FOUND correct: PvP 30/30 (median 3 scans; 30/30 also
   with `--no-prior`), PvT 30/30 (median 2; half the devices start with the tunnel gate too
@@ -74,18 +74,15 @@ hole-device labelling were not chosen.
 
 ## 4. Unfinished work, in priority order
 
-### 4.1 P1: Automation tree / audit log (the user's next priority)
+### 4.1 Done this session: automation tree / audit log
 
-HRL records every tune-up action (data collection, analysis, decision) as a node of a tree,
-graded when it runs, and mines trees across runs for success rates and failure modes (QPU paper,
-S5.3). Suggested shape for ChargeCell, which stays advisory:
-- a `runs/<id>.json` tree in the workspace: nodes {kind: scan | analysis | decision | operator
-  action, request_id, scan_id, parent, grade (ok / needs_review / failed), summary, time};
-- the protocol's `request_id` (and a new optional `run_id` / `parent_id` in `options`) links a
-  backend's requests into a tree without ChargeCell driving anything;
-- a GUI page to browse a run (depth-first order, grades, the scan and result at each node) and
-  simple statistics across runs (scans to FOUND per kind, where runs stall).
-The practice devices' closed loops (`virtual.evaluate`) are the natural first producer of trees.
+Built as proposed (DESIGN §12, PROTOCOL "Runs", DECISIONS 23-24): `runs/<id>.json` trees of
+run → stage → measure → analysis/advice/review, plus actions and notes; graded when recorded;
+`options.run_id` / `options.stage` and `/api/v1/runs*` endpoints for backends; automatic grouping
+per device (4-hour gap); practice loops and `virtual.evaluate` record runs with truth-checked
+FOUNDs; Runs page and `chargecell runs`. Possible follow-ups, if the user wants them: ChargeCell
+proposing the next *stage* (PvT → PvP → tie bar per qubit, open question 1), and comparing
+statistics between model versions (runs already store `model_id` per analysis).
 
 ### 4.2 P1: Keypoint labels for PvT and tie-bar scans
 
@@ -138,8 +135,9 @@ tie-bar coupling ratio against independent tunnel-coupling measurements.
 
 ## 6. Open questions for the user
 
-1. **Automation tree**: is the shape in 4.1 what you want (ChargeCell records and grades, the
-   backend drives), or should ChargeCell also plan the sequence of scans (PvT → PvP → tie bar)?
+1. **Automation tree**: it records and grades what the backend does (4.1). Should ChargeCell
+   also plan the sequence of stages per qubit (PvT → PvP → tie bar), or leave that to the
+   backend?
 2. **Tie-bar coupling target**: what range of coupling ratio (or t_c in µeV, with lever arms and
    electron temperature) do you want for readout? Without it ChargeCell only reports.
 3. **Real data**: when available, a few scans of each kind (any format) from two cooldowns.
@@ -156,4 +154,4 @@ python scripts/nav_trace.py --oracle --bench --kind PvP   # and PvT, tiebar: exp
 chargecell -w /tmp/demo serve --no-browser             # GUI; practice devices on the Scans page
 ```
 
-Then start on 4.1 (the automation tree).
+Then continue with section 4 in order.

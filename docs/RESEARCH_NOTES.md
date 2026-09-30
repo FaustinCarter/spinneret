@@ -68,13 +68,14 @@ publication and open-source plans may change.
 - The outcome + reason + keypoints output is in the spirit of HRL's keypoint graphs and node
   grades.
 
-- PvT and tie-bar models (built 2026-09-30, see DESIGN §10): separate models per scan kind as
+- PvT and tie-bar models (built 2026-09-30, see DESIGN §8 and §9): separate models per scan kind as
   in HRL's pipeline, with keypoints (loading lines, operating point, triple points, tie bar,
   readout point) in the protocol response.
+- An automation tree (built 2026-09-30, DESIGN §12, `chargecell/runs.py`): every scan, analysis,
+  advice and reported action of a tune-up recorded as a graded tree, with statistics across runs.
 
 ### Proposed but not built (see HANDOFF)
 - A `FOUND_SPECTATOR_UNVERIFIED` status and cross-pair consistency (P1–P2, P2–P3, P1–P3).
-- An automation tree / action log (next on the user's list).
 - A simulator backend comparison with QDarts (finite tunnel coupling, non-constant charging
   energies, sensor dots) or qarray.
 - Reservoir-starved interior dots (missing or slow reservoir lines) in simulation.

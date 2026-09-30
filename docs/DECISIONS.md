@@ -107,3 +107,31 @@ Each entry: the decision, why, and what would change it. Newest last.
     here on CPU (PvP at 96 px, 3 members); bundled weights in Git LFS; no license for now;
     advisory only (ChargeCell never moves gates; automation lives in the backend); spinQICK
     removed; next priorities after this: PvT/tie-bar models (done), then the automation tree.
+
+23. **The automation tree records; it does not drive.** HRL's tree logs actions its own software
+    takes. ChargeCell is advisory (decision 22), so its tree holds what it was sent, what it
+    answered, whether the next scan followed that answer, and what the backend reports doing
+    (run events). Gate changes between scans are also inferred from `voltage_state`. A stage's
+    scans are siblings rather than HRL's chain of inserted children: the depth-first order is
+    the same and the tree stays readable.
+
+24. **Every saved analysis is recorded, grouped automatically.** Backends need not change
+    anything: scans join their device's open run, and a run ends after 4 hours without scans.
+    Backends that want exact grouping pass `options.run_id`. Batch re-analysis after training is
+    not a tune-up action and is not recorded; re-analysing a scan with the same result adds
+    nothing.
+
+25. **Never rescan the window just seen.** The closed-loop record of the first model showed the
+    PvP guidance proposing the present window again and again after a FOUND was held back (the
+    "cover both windows" rule gave the same window when the suggestion lay inside it). An
+    identical window can only help against noise or sensor trouble, which UNINTERPRETABLE
+    handles; for everything else the next window is now 1.5x wider around the expected cell.
+
+26. **Two more checks against miscounting.** The closed loop's wrong FOUNDs came from a faint
+    first transition missed by the occupancy map (counts one too high) and sensor Coulomb-peak
+    features mistaken for dot lines. FOUND now also needs the network's own line map to agree
+    that the empty region is empty (`hidden_line_in_empty`); training data put a third of the
+    FOUND-intent windows at the anchoring boundary and 30% of the others next to (1,1), and the
+    line loss weighs sensor, spectator and interdot pixels twice as much. Practice devices now
+    follow the fixes ChargeCell asks for (retune the sensor, average longer), so closed-loop
+    numbers measure the guidance rather than an operator who ignores it.

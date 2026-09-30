@@ -72,10 +72,15 @@ exchange gate.
 | Sensor lost sensitivity | Sweep the sensor gate across its Coulomb peak and park it on the steepest flank. Check sensor compensation is on. |
 | Dots merged | Lower the exchange gate between the two dots a little (the panel says how much) and rescan. |
 | Charge jumps | Wait a few minutes after big moves; rescan; avoid large steps. |
-| Too few points | Rescan with the number of points shown. |
+| Too few points | Rescan with the number of points shown (at least twice as many). |
 
 **"Needs review"** means the model was unsure or one of its safety checks failed. Look at the scan
 yourself before acting. These scans are also the most useful ones to label.
+
+**"(1,1) may be in this window, but the electron count is not certain"** means the model thinks it
+sees (1,1) but a safety check held it back (for example, not enough of the empty region is in
+view to count electrons from). The next window is usually wider, so that the empty region and the
+neighbouring cells are in view.
 
 ## Doing the move safely
 
@@ -87,6 +92,27 @@ yourself before acting. These scans are also the most useful ones to label.
   Device page). If a move is bigger, ChargeCell tells you to take the first step, rescan, and
   analyse again.
 - If you moved other gates since the last "found" scan, targets taken from device history may be off.
+
+## Runs: the record of a tune-up
+
+Every scan ChargeCell analyses is recorded on the **Runs** page, grouped into runs (one tune-up
+session on one device) and stages (one goal, for example "Find the (1,1) cell of P1-P2"). For
+each scan you see what was measured, what ChargeCell concluded, what it advised, and whether the
+next scan followed that advice. Notes you add and actions your measurement software reports
+appear in the same list, in the order they happened.
+
+Each step gets a mark when it happens: a green tick (fine), an amber **!** (a person should
+look), a red cross (failed: the scan could not be read, or a goal stalled after three scans in a
+row without a confident next step), or a blue dot (still in progress). Use it to:
+
+- see where a long unattended tune-up got stuck, and why;
+- check whether a bad result came from the guidance or from a scan that did not follow it;
+- compare over many runs how many scans each goal takes and which problems come up most often
+  (the table under the run).
+
+Scans from the same device join the same run until nothing happens for 4 hours; your
+measurement software can also start and name runs itself (docs/PROTOCOL.md). Click **Mark run
+finished** when a tune-up is done. **Download** saves a run as JSON or as text.
 
 ## Labelling a scan
 
@@ -133,4 +159,5 @@ decide whether P1 and P3 load electrons, and the exchange gates X1 and X2 set ho
 dots couple. Scan it, follow the advice with **Measure it on the practice device** (or **Take the
 tie-bar scan** once (1,1) is found), and use **Reveal the true answer** to check. It is a safe way
 to learn the workflow and to see how the guidance behaves. Practice devices come in very
-different voltage scales on purpose.
+different voltage scales on purpose. Practice runs appear on the Runs page too, where every
+"found" is checked against the true answer.

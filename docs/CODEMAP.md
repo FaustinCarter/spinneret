@@ -31,12 +31,13 @@ chargecell/
   protocol.py          chargecell/1 request/response models, analysis -> response, handlers
   client.py            stdlib-only HTTP client and request builder for measurement code
   virtual.py           practice devices (P, X, T gates; any kind); closed-loop evaluation per kind
+  runs.py              automation tree: graded record of every tune-up run; statistics across runs
   jobs.py              background JobManager (one worker thread)
   server/app.py        FastAPI app (create_app) behind the GUI
   server/static/       index.html, style.css, plot.js, app.js (no build step)
   cli.py, __main__.py  command line
 tests/                 conftest (OracleAnalyzer), test_core, test_guidance, test_api,
-                       test_protocol, test_kinds
+                       test_protocol, test_kinds, test_runs
 scripts/               train_starter, eval_model, nav_trace, gui_check
 ```
 
@@ -94,6 +95,9 @@ scans/<id>/meta.json                 Scan.meta()
 scans/<id>/annotation.json           current label
 scans/<id>/annotation_history/<stamp>_<annotator>.json   every save (audit trail)
 scans/<id>/analysis.json             latest analysis result
+scans/<id>/run.json                  {run_id, stage_id, node_id}: where the scan sits in its run
+runs/<run_id>.json                   automation tree of one run (nodes in insertion order)
+runs/index.json                      one summary per run (rebuilt from the run files if missing)
 synthetic/<name>/manifest.json + shard_###.npz + shard_###.json (per-sample meta)
 models/<id>/model.json + member_<k>.pt   (weights of bundled models are in Git LFS)
 models/ACTIVE, models/ACTIVE_<kind>  active model id per scan kind (ACTIVE = PvP)
@@ -202,7 +206,9 @@ plus compensation residuals.
 `PRESETS` (hrl_linear, hrl_triangle, mixed). `sample_device` samples cross-capacitance
 decaying with distance (nearest U(0.25, 0.7) × distance^-power), compensation residual σ in
 U(0.01, 0.12), compensation off in 5% of devices. `sample_window(rng, p, intent, pair, coarse)`
-places the window to aim for an outcome. `sample_artifacts` / `Artifacts`: jumps, latching,
+places the window to aim for an outcome (35% of FOUND-intent windows keep a borderline empty
+region of 0.7–1.9 spacings; 30% of the others sit within ±1.6 spacings of (1,1), where
+miscounting is easiest). `sample_artifacts` / `Artifacts`: jumps, latching,
 pink and telegraph noise, gain drift, white noise at a target SNR. `render` produces the
 signal, axes, occupancy, and sensor info. `oracle` produces the true status, reason, ref flags,
 vis_frac, SNR (charge-step contrast / noise), masks, target, spacing, and spectator occupancy.
@@ -218,7 +224,8 @@ preset, mix)` takes about 55 ms and yields ~41% FOUND, 27% NOT, 32% UNINTERP by 
 transposes (a transpose swaps A and B labels). `train`: trains the ensemble members
 (OneCycle LR, optional `max_minutes`), then `full_metrics` on validation sets,
 `calibrate_found_threshold` (smallest threshold reaching `target_precision`), writes the model
-card, and activates the model if none is active. Progress callback: `(fraction, message,
+card, and activates the model if none is active. The line loss weighs line pixels per family
+(`LINE_POS_WEIGHT`: 8 for interdot, spectator, sensor and tie bar, else 4). Progress callback: `(fraction, message,
 record|None)`.
 
 ### model/infer.py
@@ -233,8 +240,11 @@ model. Otherwise it predicts and applies the FOUND gates: argmax FOUND, p ≥ th
 (whichever of p[1] and p[2] is larger), with reasons restricted to the status. Then it builds
 cell geometry, keypoints, the lattice, spectator check, recommendation, and overlays.
 `needs_review` is set if the scan was demoted, mutual information exceeds the model's
-threshold, or max p < 0.6. `prediction_for_annotation` gives a prediction on the scan's own
-grid (for drafts).
+threshold, or max p < 0.6. Two geometric FOUND checks do not trust the anchor heads:
+`empty_region_too_narrow` (the n = 0 region must be ≥ `ANCHOR_WIDTH` = 1.3 spacings) and
+`hidden_line_in_empty` (no column of the eroded n = 0 region may carry a mean line probability
+above `HIDDEN_LINE` = 0.22). `decision["held_back"]` tells the guidance that a FOUND was
+demoted. `prediction_for_annotation` gives a prediction on the scan's own grid (for drafts).
 
 ### analysis/lattice.py
 `extract_lattice(occ_a, occ_b, lines_p, ref_a, ref_b)`. An anchored dot uses the per-row first
@@ -251,7 +261,10 @@ both dots. Exploration is 0.75 of a window. The history prior (last FOUND on the
 beats exploration. The window is 3.2 cells (never shrunk on an unmeasured spacing). Points are
 `points_per_addition` per addition voltage, clipped to [min, max]. Large moves are split to
 `max_step` (reported window = first step, target = final). Windows are kept inside safe limits.
-Reason-specific fixes apply for UNINTERPRETABLE.
+Reason-specific fixes apply for UNINTERPRETABLE (too coarse: at least twice the points). A
+suggestion equal to the present window (`same_as_scan`) is replaced by a 1.5x wider one
+(`widened`), also in `widen_if_revisited` for PvT and tie bar. Without a known spacing, new
+windows keep the present point pitch.
 
 ### importers
 `load_any(path, content=None, meta=None)` accepts bytes for uploads; `meta.axis_units = "mV"`
@@ -264,9 +277,28 @@ device and cooldown names are restricted to `[A-Za-z0-9._-]` because they become
 `response_from_analysis(analysis, cfg)` maps statuses to outcomes: FOUND -> `found`;
 NOT_IN_WINDOW with guidance confidence high/medium -> `next_scan`; everything else ->
 `no_confident_step` with a `suggestion`. `handle_analyze` and `handle_submit` are shared by
-the HTTP API and the CLI. Only `ANALYSABLE_KINDS` (PvP) are analysed; other kinds are stored,
-and `model/dataset.real_arrays` skips them. **Change the protocol additively** (new optional
-fields, enum values) or bump to chargecell/2.
+the HTTP API and the CLI; `handle_analyze` records saved analyses in the automation tree and
+returns `response.run` (`RunRef`). `Options.run_id` / `Options.stage` choose the run and stage.
+`RunStart`, `RunEvent`, `RunClose` are the bodies of the run endpoints. `ANALYSABLE_KINDS` are
+PvP, PvT and tiebar; other kinds are stored only, and `model/dataset.real_arrays` uses labelled
+PvP scans only. **Change the protocol additively** (new optional fields, enum values) or bump
+to chargecell/2.
+
+### runs.py (automation tree; DESIGN §12, PROTOCOL "Runs")
+A run is `{id, device, cooldown, title, source (backend|gui|cli|practice), created, updated,
+closed{time, result, note}|null, grade, seq, nodes[]}`; node `{id: "n<seq>", parent, type (run |
+stage | measure | analysis | advice | review | action), seq, time, grade (pass|warn|fail|info|
+open), title, summary, data}`. `record(ws, scan, analysis, run_id, stage, source, request_id)`
+is the only entry point for scans: it finds the run (explicit id, else the device's open run
+within `RUN_GAP_HOURS`, else a new one), the stage (`_stage_for`: last stage if same kind + gate
+set, or same backend label), adds measure/analysis/advice nodes (advice via
+`protocol.response_from_analysis`, so the tree shows what the backend was told), regrades
+stages and the run (`_regrade`), saves the run and index, and writes `scans/<id>/run.json`.
+Re-analysis appends under the existing measure node unless the result is identical (same model,
+status, reason, confidence). `add_action`, `record_review` (called by the annotation PUT),
+`close`, `ordered` (depth-first with `depth`), `stats`, `format_tree` (CLI/text). All writes
+hold `storage._lock`. Practice scans carry their truth; a FOUND is checked with
+`virtual.found_is_right`.
 
 ### virtual.py
 Practice devices use plungers P1, P2, P3 (dots 0, 1, 2), exchange gates X1 (P1-P2) and X2 (P2-P3)
@@ -279,9 +311,14 @@ small shifts) and the T gates (dot shifts, and latching of the edge dots in plun
 moves `v11` with them. `measure(..., kind)` renders PvP, tiebar (two plungers) or PvT (a plunger
 and its tunnel gate, either way round) at SNR U(4, 25), updates the DC point and stores the
 truth; `simulate_clean` re-renders it noise-free for the oracle. `evaluate(ws, kind, ...)` runs
-the closed loop per kind (`evaluate_navigation` = PvP) and judges each FOUND against the truth
-(`_found_is_right`, `pvt_found_is_right`, `tiebar_found_is_right`). Start windows are three
+the closed loop per kind (`evaluate_navigation` = PvP), records each device's loop as a run
+(`record=True`), and judges each FOUND against the truth (`found_is_right` dispatches to
+`_found_is_right`, `pvt_found_is_right`, `tiebar_found_is_right`). Start windows are three
 typical spacings (`start_window`); tie-bar runs start near the true tie bar (`_tiebar_start`).
+The simulated operator follows the advice (`apply_advice`: gate changes such as an exchange gate,
+then `follow_fix`: retune the sensor at the next window's centre for sensor_insensitive/low_snr,
+average 4x longer for low_snr via `snr_boost`). The sensor is tuned at the starting voltages
+(`_tune_sensor`, stored in `vd["sensor"]` and applied by `device_state`).
 
 ## 4. HTTP API (`server/app.py`)
 
@@ -300,7 +337,11 @@ typical spacings (`start_window`); tie-bar runs start near the true tie bar (`_t
 | GET | `/api/v1/scans/{id}/response?download=` | saved analysis as a chargecell/1 response |
 | POST | `/api/v1/analyze` | chargecell/1 request -> response (422 invalid, 409 no model) |
 | POST | `/api/v1/scans` | store a scan (+ optional label) as training data |
-| GET | `/api/v1/schema` | JSON Schemas of request and response |
+| GET | `/api/v1/schema` | JSON Schemas of request, response and run messages |
+| GET/POST | `/api/v1/runs` | run summaries (`?device=&source=`) / start a run |
+| GET | `/api/v1/runs/{id}?format=json|text&download=` | a run's graded tree (depth-first) |
+| POST | `/api/v1/runs/{id}/events`, `/api/v1/runs/{id}/close` | record an action or note / close a run |
+| GET | `/api/v1/run_stats?device=&source=` | statistics across runs |
 | POST | `/api/analyze_all?only_new=true` | job |
 | GET / PUT | `/api/devices`, `/api/devices/{name}` | device configs (validated by pydantic) |
 | GET/POST | `/api/synthetic` | list / generate (job; body includes `kind`) |
@@ -309,7 +350,11 @@ typical spacings (`start_window`); tie-bar runs start near the true tie bar (`_t
 | POST | `/api/models/{id}/activate`, `/api/train` | activate (for its kind) / train (job; body = TrainConfig fields incl. `kind`; datasets must match kind and size) |
 | GET/POST | `/api/jobs`, `/api/jobs/{id}`, `/api/jobs/{id}/cancel` | job status / cancel |
 | GET/POST | `/api/virtual`, `/api/virtual/{vd}/measure` | practice devices (create takes the first scan of body `kind`; measure takes `kind`) |
-| POST | `/api/scans/{id}/run_next?window=next_window|tiebar_window|retune_window` | practice mode: apply gate changes, measure the recommended window (as a tiebar scan for the last two) and analyse |
+| POST | `/api/scans/{id}/run_next?window=next_window|tiebar_window|retune_window` | practice mode: apply gate changes and fixes (`virtual.apply_advice`, logged in the run), measure the recommended window (as a tiebar scan for the last two), analyse and record |
+
+Saved analyses are recorded in the automation tree by `POST /api/scans/{id}/analyze`, `run_next`,
+`POST /api/v1/analyze` and `chargecell analyze --save`; `PUT /api/scans/{id}/annotation` adds a
+review node. Batch analysis (`/api/analyze_all`) does not record.
 | GET | `/`, `/static/*`, `/api/docs` | GUI, assets, OpenAPI docs |
 
 ## 5. GUI (`server/static`)
@@ -326,7 +371,7 @@ numerals.
   handling reversed axes. `hooks: down/drag/up/hover/dblclick/context` are for editing tools.
 - `app.js`: helpers (`h()` element builder, `api()` fetch wrapper with error toasts),
   `scanPicker`, `plotBar`, overlay builders (`codeImage`, `codeLabels`, `linesImage`,
-  `dashedRect`, `arrow`), and `pages.{review,label,scans,synthetic,train,device}`, each with
+  `dashedRect`, `arrow`), and `pages.{review,label,scans,runs,synthetic,train,device}`, each with
   `build()` (once) and `enter(arg)` (on every route). Routing is by hash `#/<page>/<scanId>`.
   `pollStatus` runs every 1.5 s (job indicator, model indicator, refresh on job completion).
   `S.pendingDraft` makes "Correct in labeller" open the Label page with a model draft loaded.
@@ -335,6 +380,8 @@ numerals.
   polylines are on the analysis axes and swapped when a PvT analysis was transposed); `onAxes`
   maps a recommended window onto the scan's own axes by gate name. The Label page and label queue
   handle PvP scans only; `practiceButtons()` creates a practice device for a chosen kind.
+  `pages.runs` lists runs (`#/runs/<runId>` selects one), draws the tree with `gradeMark`,
+  adds notes, closes runs, and shows `run_stats`. The Review page links to a scan's run.
 - Labeller: tools V/A/B/S/E; click adds points; double-click or Enter finishes (trailing
   near-duplicate points are dropped); Alt-click inserts; right-click deletes a point; Backspace;
   Ctrl+Z/Shift+Z undo stack of JSON snapshots; live preview is debounced 180 ms. Saving FOUND
@@ -357,5 +404,9 @@ numerals.
   fitted interdot width matches the physics, oracle closed loops for PvT (no priors or limits)
   and tie bar, PvT axes either way round, tiny training runs per kind (per-kind active model),
   and protocol responses with the new feature types.
+- `test_runs.py`: a backend run through the protocol (PvP to FOUND, then the tie bar) recorded
+  as a graded tree in depth-first order, advice following, device-run grouping and the 4-hour
+  gap, closed runs, errors; practice closed loops as runs with truth-checked FOUNDs, reviews,
+  actions, statistics, a wrong FOUND failing its stage; the GUI practice loop and labels.
 - Guidance benchmarks outside pytest: `scripts/nav_trace.py --oracle --bench --kind PvP|PvT|tiebar
   [--no-prior] [-v]` (30 devices).

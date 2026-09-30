@@ -3,9 +3,10 @@
 ChargeCell reads the charge-stability scans of an exchange-only qubit tune-up, one model per scan
 kind as in HRL's pipeline: PvT (load one electron with a clean reservoir tunnel rate), PvP (find
 the (1,1) cell) and tiebar (triple points, coupling, readout point). It tells the operator what a
-scan shows and where to scan next. It has simulators, a labelling GUI, a training pipeline, and a
-backend-neutral JSON protocol (chargecell/1) for measurement software. Users are physicists and lab technicians working on Si/SiGe exchange-only
-spin qubits (HRL style), many of them not software engineers.
+scan shows and where to scan next, and records every tune-up as a graded automation tree
+(audit log). It has simulators, a labelling GUI, a training pipeline, and a backend-neutral JSON
+protocol (chargecell/1) for measurement software. Users are physicists and lab technicians
+working on Si/SiGe exchange-only spin qubits (HRL style), many of them not software engineers.
 
 **Start here:** @docs/HANDOFF.md has the current status, unfinished work in priority order,
 known sharp edges, and open questions for the user. Read `docs/CODEMAP.md` before changing code.
@@ -17,14 +18,15 @@ Background: `docs/DESIGN.md`, `docs/DECISIONS.md`, `docs/RESEARCH_NOTES.md`. Int
 ```bash
 git lfs install && git lfs pull                 # bundled model weights are in Git LFS
 pip install -e ".[dev]"                          # Python >= 3.10; CPU torch is fine
-pytest -q                                        # 24 tests, ~3 min on 4 cores
+pytest -q                                        # 28 tests, ~3 min on 4 cores
 python scripts/nav_trace.py --oracle --bench --kind PvP   # guidance benchmark, expect 30/30
 python scripts/nav_trace.py --oracle --bench --kind PvT   # (also tiebar; add --no-prior)
 chargecell -w /tmp/demo_ws serve --no-browser    # GUI at http://127.0.0.1:8765
 chargecell schema                                # chargecell/1 JSON Schema
 python scripts/gui_check.py --out /tmp/shots     # browser check (needs playwright + chromium)
-python scripts/train_starter.py --kind PvP --size 96 --epochs 14 --ensemble 3 -n 6000 --workers 4 --bundle
+python scripts/train_starter.py --kind PvP --size 96 --epochs 14 --ensemble 3 -n 8000 --workers 4 --bundle
 python scripts/eval_model.py --model-dir <ws>/models/<id>   # any kind; held-out + closed loop
+chargecell -w <ws> runs [run_id] [--stats]       # automation tree: runs, one run's graded tree
 ```
 
 ## Rules for this codebase
@@ -58,6 +60,9 @@ python scripts/eval_model.py --model-dir <ws>/models/<id>   # any kind; held-out
   ChargeCell stays advisory and never moves gates. Change the protocol additively (new optional
   fields or enum values) or bump the version; keep `docs/PROTOCOL.md` and `tests/test_protocol.py`
   in step with `protocol.py`.
+- **Automation tree:** every saved analysis goes through `runs.record` (protocol, GUI analyse,
+  practice loop, CLI `--save`); keep new analysis entry points recording, and keep node grades
+  set at the time of recording. `tests/test_runs.py` guards the tree shape and grades.
 - **Model weights** in `chargecell/assets/models/` are tracked with Git LFS (`.gitattributes`).
   Replace the bundled model only with one that meets the acceptance bar in HANDOFF.
 - Run `pytest -q` before committing. Update `docs/HANDOFF.md` when you finish or discover

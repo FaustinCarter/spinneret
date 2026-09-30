@@ -33,7 +33,13 @@ act on a response, and should ramp DC voltages in steps no larger than `max_step
 | POST | `/api/v1/analyze` | request | response |
 | POST | `/api/v1/scans` | request, optional `label` | `{protocol, request_id, scan_id, kind, labelled}` |
 | GET | `/api/v1/scans/{scan_id}/response` | – | the saved result of an analysed scan, as a response |
-| GET | `/api/v1/schema` | – | `{protocol, request, response}` JSON Schemas |
+| GET | `/api/v1/schema` | – | JSON Schemas of the request, the response and the run messages |
+| POST | `/api/v1/runs` | `{device, title, cooldown, run_id?}` | the new run's summary (see [Runs](#runs-the-automation-tree)) |
+| GET | `/api/v1/runs?device=&source=` | – | run summaries, most recent first |
+| GET | `/api/v1/runs/{run_id}` | – | the run's graded tree (`?format=text` for one line per action) |
+| POST | `/api/v1/runs/{run_id}/events` | `{text, gate_changes, voltage_unit, by, note}` | the recorded node |
+| POST | `/api/v1/runs/{run_id}/close` | `{result, note}` | the run's summary |
+| GET | `/api/v1/run_stats?device=&source=` | – | success rates and failure modes across runs |
 
 Errors: `422` means the request is invalid or unsupported. `detail` is either a list of field
 errors or a sentence. `409` means no trained model is available.
@@ -60,7 +66,7 @@ errors or a sentence. `409` means no trained model is available.
     "notes": "",
     "metadata": {"run": 42}
   },
-  "options": {"save": true, "model_id": null}
+  "options": {"save": true, "model_id": null, "run_id": "q1-tuneup", "stage": null}
 }
 ```
 
@@ -75,6 +81,8 @@ errors or a sentence. `409` means no trained model is available.
 | `scan.id` | Optional; letters, digits, `.`, `_`, `-`. Sending the same id again overwrites that scan. |
 | `options.save` | Store the scan and result in the workspace (default `true`). Stored results appear in the GUI, can be labelled, and let later guidance on the same device use them as history. |
 | `options.model_id` | Use a specific model version instead of the active one. |
+| `options.run_id` | The tune-up run to record this scan in (created if new). Default: the device's open run, or a new one after 4 hours without scans. See [Runs](#runs-the-automation-tree). |
+| `options.stage` | Optional name of the tune-up stage, e.g. `"Q1 loading"`. Default: one stage per kind of scan and pair of gates. |
 | `label` | Only for `POST /api/v1/scans`. See below. |
 
 Unknown fields are rejected, so typos surface as errors instead of being silently ignored.
@@ -109,7 +117,8 @@ Unknown fields are rejected, so typos surface as errors instead of being silentl
   "steps": ["Next scan: P1 0.8610 to 0.9570 V (48 points), P2 0.8420 to 0.9380 V (48 points)."],
   "warnings": [],
   "model_id": "model-20260930-...",
-  "created": "2026-09-30T10:15:02+00:00"
+  "created": "2026-09-30T10:15:02+00:00",
+  "run": {"run_id": "q1-tuneup", "stage_id": "n1", "node_id": "n7"}
 }
 ```
 
@@ -205,6 +214,73 @@ as in the GUI's labeller (`docs/CODEMAP.md` §2, "Annotation"):
 A status alone is accepted, but the boundaries are what teach the network where the cells are.
 Only labelled `PvP` scans are used for training so far.
 
+## Runs: the automation tree
+
+HRL records every action of an automated tune-up as a node of a tree, grades each node when it
+happens, and mines the trees of many runs for success rates and failure modes (QPU paper,
+S5.3). ChargeCell keeps the same record for everything it sees. It stays advisory, so it records
+what it was sent, what it answered, and what the backend tells it; it never drives the device.
+
+```
+run            one tune-up session on one device
+  stage        one goal pursued with one kind of scan and pair of gates ("Find the (1,1) cell of P1-P2")
+    measure    a scan: window, gate changes since the last scan, whether it followed the last advice
+      analysis status, reason, confidence (a re-analysis with a new model adds another)
+      advice   found / next scan / no confident step, with the window
+      review   a person's label for the scan: confirms or corrects the analysis
+    action     something the backend or operator reports doing, or a note
+```
+
+Every saved analysis (`options.save`, the default) is recorded. The response's `run` block says
+where. Pass `options.run_id` to group a tune-up's scans; without it a scan joins its device's
+open run, or starts one after 4 hours without scans on that device. A scan starts a new stage
+when its kind or gate pair differs from the previous scan's (or when `options.stage` names a new
+stage); returning to an earlier goal later starts another stage, so the tree stays in time order.
+A depth-first walk of the tree is the order in which things happened.
+
+**Grades** are set when a node is recorded: `pass`; `warn` (a person should look: the model
+asked for review, no confident next step, or a reviewer's label disagreed); `fail` (the scan
+could not be interpreted, or, on practice devices, a FOUND that the ground truth shows is
+wrong); `info` (actions and notes); `open` (stages and runs in progress). A stage is `pass` once
+its goal is found, `fail` if it stalled (3 scans in a row without a confident next step) or its
+FOUND was wrong, and `warn` if the run moved on or ended without reaching the goal. A closed run
+is `pass` if every stage reached its goal, `fail` if it was aborted or a stage failed, else `warn`.
+
+Start a run (optional; choose the id or let ChargeCell generate one):
+
+```json
+POST /api/v1/runs
+{"device": "devA", "title": "Q1 tune-up, cooldown 7", "cooldown": "CD7", "run_id": "q1-tuneup"}
+```
+
+Report what the backend did between scans, so the tree is complete (`gate_changes` in
+`voltage_unit`, default volts; `note: true` for a remark):
+
+```json
+POST /api/v1/runs/q1-tuneup/events
+{"text": "retuned the sensor", "gate_changes": {"M1": 0.002}, "by": "tuneup.py"}
+```
+
+Close it (`result`: `done`, `stopped` or `aborted`):
+
+```json
+POST /api/v1/runs/q1-tuneup/close
+{"result": "done", "note": "Q1 ready for readout calibration"}
+```
+
+`GET /api/v1/runs/{run_id}` returns the run with its nodes in depth-first order, each with
+`{id, parent, type, time, grade, title, summary, data, depth}`. `data` holds the details: for a
+measure the window, `voltage_state`, `gate_changes`, `followed` (`yes`/`no`/`null`) and
+`deviation`; for an analysis `status`, `reason`, `confidence`, `needs_review`, `model_id`, the
+checks that held back a FOUND, and `truth` on practice devices; for advice `outcome`, `headline`,
+`steps`, `window`, `gate_changes` and the found `features`. `?format=text` gives one line per
+node. `GET /api/v1/run_stats` summarises all runs per scan kind: goals reached, median and 90th
+percentile scans to the goal, stalled and unfinished goals, wrong FOUNDs on practice devices,
+the most common failed or flagged analyses, where unfinished goals stopped, how often the next
+scan followed the advice, and how often reviewers' labels agreed.
+
+The GUI shows runs on the **Runs** page; `chargecell runs [run_id] [--stats]` prints them.
+
 ## Python client
 
 ```python
@@ -222,6 +298,12 @@ else:
 
 cc.submit(signal, x_volts, y_volts, "P1", "P2", device="devA", cooldown="CD7")   # training data
 make_request(...)                                    # same JSON, for file exchange
+
+run = cc.start_run(device="devA", title="Q1 tune-up")["id"]      # optional: group a tune-up
+r = cc.analyze(..., run_id=run)
+cc.log(run, "retuned the sensor", gate_changes={"M1": 0.002})
+cc.close_run(run, "done")
+print(cc.run_text(run))                              # the graded tree, one line per action
 ```
 
 ## Versioning
