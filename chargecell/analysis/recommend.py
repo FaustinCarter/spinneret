@@ -249,7 +249,8 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
                                     "y": [ro[yg] - w / 2, ro[yg] + w / 2, n]}
             steps.append(f"For readout setup, take a tie-bar scan: zoom on the (1,1)-(2,0) "
                          f"boundary near {xg} = {_v(ro[xg])}, {yg} = {_v(ro[yg])} (a "
-                         f"{fmt_mag(w)} window).")
+                         f"{fmt_mag(w)} window). Retune the sensor ({cfg.sensor_gate}) at the "
+                         "centre of that window first: the tie bar is a small signal.")
         for sp in decision.get("spectators", []):
             if sp["status"] != "verified":
                 steps.append(f"Spectator {sp['gate']} is {sp['status']}: this scan cannot show "

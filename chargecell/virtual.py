@@ -119,11 +119,7 @@ def follow_fix(ws: Workspace, vd_id: str, analysis: dict, window: dict | None) -
     reason = analysis.get("reason")
     done = []
     if reason in ("sensor_insensitive", "low_snr"):
-        at = {}
-        if window:
-            at = {window["x_gate"]: (window["x"][0] + window["x"][1]) / 2,
-                  window["y_gate"]: (window["y"][0] + window["y"][1]) / 2}
-        at = {g: v for g, v in at.items() if g in GATES}
+        at = _centre(window) if window else {}
         retune_sensor(ws, vd_id, at)
         done.append("Retuned the sensor to the steepest flank of its peak" +
                     (" at the centre of the next window" if at else ""))
@@ -133,10 +129,12 @@ def follow_fix(ws: Workspace, vd_id: str, analysis: dict, window: dict | None) -
     return done
 
 
-def apply_advice(ws: Workspace, vd_id: str, analysis: dict, window: dict) -> list[tuple]:
+def apply_advice(ws: Workspace, vd_id: str, analysis: dict, window: dict,
+                 zoom: bool = False) -> list[tuple]:
     """Do what the advice says before the next scan, as an operator would: change the gates it
-    asks for (e.g. an exchange gate) and apply the fix for an unreadable scan. Returns the
-    actions as (text, gate_changes) for the automation tree."""
+    asks for (e.g. an exchange gate), apply the fix for an unreadable scan, and, before a
+    tie-bar zoom (``zoom``), retune the sensor at the zoom window. Returns the actions as
+    (text, gate_changes) for the automation tree."""
     rec = analysis.get("recommendation") or {}
     vd = ws.load_virtual_device(vd_id)
     changes = {}
@@ -146,7 +144,17 @@ def apply_advice(ws: Workspace, vd_id: str, analysis: dict, window: dict) -> lis
             changes[g] = float(d)
     ws.save_virtual_device(vd_id, vd)
     actions = [("Set the gates as advised", changes)] if changes else []
+    if zoom:
+        retune_sensor(ws, vd_id, _centre(window))
+        actions.append(("Retuned the sensor at the centre of the tie-bar window", {}))
     return actions + [(text, {}) for text in follow_fix(ws, vd_id, analysis, window)]
+
+
+def _centre(window: dict) -> dict:
+    """Centre of a window {x_gate, y_gate, x, y}, for the plunger gates only (gate -> V)."""
+    at = {window["x_gate"]: (window["x"][0] + window["x"][1]) / 2,
+          window["y_gate"]: (window["y"][0] + window["y"][1]) / 2}
+    return {g: v for g, v in at.items() if g in GATES}
 
 
 def start_window(vd: dict, gates=("P1", "P2"), points: int = 90) -> tuple:
@@ -380,6 +388,9 @@ def evaluate(ws: Workspace, kind: str = "PvP", n_devices: int = 10, max_scans: i
             win = (("P1", wp), ("T1", wt))
         elif kind == "tiebar":
             win = _tiebar_start(vd, rng)
+            # as after a PvP FOUND: the operator retunes the sensor for the zoom
+            retune_sensor(ws, vd["id"], {win[0][0]: np.mean(win[0][1][:2]),
+                                         win[1][0]: np.mean(win[1][1][:2])})
         else:
             wx, wy = start_window(vd)
             win = (("P1", wx), ("P2", wy))

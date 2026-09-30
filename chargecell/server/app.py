@@ -384,6 +384,7 @@ def create_app(workspace: str | Path) -> FastAPI:
             scan = virtual.measure(ws, vd["id"], "P1", "T1", wp, wt)
         elif kind == "tiebar":
             (gx, wx), (gy, wy) = virtual._tiebar_start(vd, np.random.default_rng(vd["seed"]))
+            virtual.retune_sensor(ws, vd["id"], {gx: (wx[0] + wx[1]) / 2, gy: (wy[0] + wy[1]) / 2})
             scan = virtual.measure(ws, vd["id"], gx, gy, wx, wy, kind="tiebar")
         else:
             wx, wy = virtual.start_window(vd)
@@ -419,7 +420,8 @@ def create_app(workspace: str | Path) -> FastAPI:
         # as an operator would: set other gates as advised (e.g. an exchange gate), apply the
         # fix for an unreadable scan (retune the sensor, average longer), then measure
         ref = runs.run_ref(ws, scan_id)
-        for text, changes in virtual.apply_advice(ws, vd_id, res, win):
+        for text, changes in virtual.apply_advice(ws, vd_id, res, win,
+                                                  zoom=window == "tiebar_window"):
             if ref:
                 runs.add_action(ws, ref["run_id"], text, changes, by="practice operator")
         kind = "tiebar" if window in ("tiebar_window", "retune_window") else s.kind
