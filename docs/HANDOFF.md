@@ -68,9 +68,22 @@ hole-device labelling were not chosen.
 
 (Pending: filled in once the starter models are trained and evaluated.)
 
-- First PvP model of this session (96 px, 3 x 12 epochs, 4000 scans, old labels), for the
-  record: FOUND precision 0.97 but recall 0.27, closed loop 5/20 with one wrong FOUND. The
-  failures led to DECISIONS 17 and 18.
+- Earlier model versions of this session, for the record (each failure was traced with the
+  closed-loop records and fixed in the simulator, the harness or the decision logic):
+  - PvP v0 (96 px, 3 x 12 epochs, 4000 scans, old labels): FOUND precision 0.97, recall 0.27,
+    closed loop 5/20 with one wrong FOUND → DECISIONS 17, 18.
+  - PvP v1 (96 px, 3 x 14 epochs, 6000 scans): held-out precision 0.976, recall 0.70; closed
+    loop 12/20 found, 9 right (the practice operator ignored "retune the sensor") → DECISIONS
+    25, 26 (practice devices follow the fixes, hidden-line check, harder training windows,
+    zoom out instead of rescanning the same window).
+  - PvT v1 (64 px, 2 x 10 epochs, 5000 scans): held-out precision 0.96, recall 0.65; closed
+    loop 6/20, one wrong. Practice windows (the operator's first guess, up to ~15 decades of
+    tunnel rate, 90 x 90 points) lay outside the training windows (2-8 decades, often ~24
+    rows): the model read latching as charge instability. Training windows widened.
+  - Tie bar v1 (64 px, 2 x 10 epochs, 5000 scans): held-out precision 0.96, recall 0.27;
+    closed loop 2/20. Practice sensors could not see the interdot step (truly too noisy in half
+    the scans); practice devices now have a readout-capable sensor, and the model gets twice
+    the data and longer training.
 
 ## 4. Unfinished work, in priority order
 

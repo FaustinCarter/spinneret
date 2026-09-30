@@ -228,6 +228,12 @@ Everything is computed in the model's index grid and converted to volts at the e
   practice devices with random voltage scales, 30 devices per kind: PvP 30/30 (median 3 scans,
   also 30/30 with no priors or limits), PvT 30/30 (median 2, half the devices start with the
   tunnel gate too closed), tie bar 30/30 (median 1); every FOUND matches the ground truth.
+- **Practice devices behave like a tuned-up operator's device**: the sensor is tuned at the
+  starting voltages and is sensitive to the P1-P2 interdot step (as a readout sensor must be);
+  the simulated operator follows every piece of advice, including the fixes (retune the sensor,
+  average longer, change an exchange gate) and the sensor retune before a tie-bar zoom. Each
+  closed loop is recorded as a run of the automation tree, which is how the failures of earlier
+  model versions were traced (HANDOFF section 3).
 - **Starter models**: see section 11.
 
 ## 11. Starter models

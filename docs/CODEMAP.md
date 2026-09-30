@@ -316,9 +316,11 @@ the closed loop per kind (`evaluate_navigation` = PvP), records each device's lo
 `_found_is_right`, `pvt_found_is_right`, `tiebar_found_is_right`). Start windows are three
 typical spacings (`start_window`); tie-bar runs start near the true tie bar (`_tiebar_start`).
 The simulated operator follows the advice (`apply_advice`: gate changes such as an exchange gate,
-then `follow_fix`: retune the sensor at the next window's centre for sensor_insensitive/low_snr,
-average 4x longer for low_snr via `snr_boost`). The sensor is tuned at the starting voltages
-(`_tune_sensor`, stored in `vd["sensor"]` and applied by `device_state`).
+a sensor retune before a tie-bar zoom, then `follow_fix`: retune the sensor at the next window's
+centre for sensor_insensitive/low_snr, average 4x longer for low_snr via `snr_boost`). The
+sensor is tuned at the starting voltages (`_tune_sensor`, stored in `vd["sensor"]` and applied
+by `device_state`), and couples at most 0.65 as strongly to one of P1/P2 as to the other (a
+readout sensor must see the interdot step), drawn from a separate random stream.
 
 ## 4. HTTP API (`server/app.py`)
 
