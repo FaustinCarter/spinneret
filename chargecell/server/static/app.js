@@ -84,6 +84,19 @@ const REASONS_BY_STATUS = {
   NOT_IN_WINDOW: ["no_transitions", "occupancy_too_low", "no_reference", "partially_visible"],
   UNINTERPRETABLE: ["low_snr", "sensor_insensitive", "dots_merged", "charge_instability", "resolution_too_coarse"],
 };
+const KIND_REASONS = {
+  PvT: { FOUND: ["none"], NOT_IN_WINDOW: ["no_transitions", "occupancy_too_low", "no_reference", "tunnel_rate_too_low", "reservoir_too_open"],
+         UNINTERPRETABLE: ["low_snr", "sensor_insensitive", "charge_instability", "resolution_too_coarse"] },
+  tiebar: { FOUND: ["none"], NOT_IN_WINDOW: ["no_tiebar", "partially_visible"],
+            UNINTERPRETABLE: ["low_snr", "sensor_insensitive", "dots_merged", "charge_instability", "resolution_too_coarse"] },
+};
+const reasonsFor = (kind, st) => (KIND_REASONS[kind] || REASONS_BY_STATUS)[st] || [];
+const KIND_REASON_LABEL = {
+  PvT: { none: "Empty dot, two loading lines, clean tunnel range", occupancy_too_low: "Second loading line not in view",
+         no_reference: "Empty dot not in view", no_transitions: "No loading lines visible" },
+  tiebar: { none: "Tie bar and both triple points in view", partially_visible: "Tie bar cut off by the edge" },
+};
+const reasonLabel = (kind, r) => (KIND_REASON_LABEL[kind] || {})[r] || REASON_LABEL[r] || r;
 const FAMILY_COLOR = { a: "#2E5AAC", b: "#13808A", interdot: "#17202B", spectator: "#7A4FB5", sensor: "#8A7A1E" };
 const FAMILIES = ["a", "b", "interdot", "spectator", "sensor"];
 
@@ -151,15 +164,16 @@ function plotBar(plot, extra = []) {
 }
 
 // ---------------------------------------------------------------- overlay builders
-function codeImage(code, nx, ny, style = "cells") {
+function codeImage(code, nx, ny, single = false) {
+  // single: one dot (PvT), its count in a; the one-electron region is highlighted
   const c = document.createElement("canvas");
   c.width = nx; c.height = ny;
   const ctx = c.getContext("2d"), img = ctx.createImageData(nx, ny);
   for (let k = 0; k < nx * ny; k++) {
-    const a = code[k] >> 3, b = code[k] & 7;
+    const a = code[k] >> 3, b = single ? 0 : code[k] & 7;
     if (a === 7 || b === 7) continue;
     let rgba;
-    if (a === 1 && b === 1) rgba = [46, 90, 172, 105];
+    if (single ? a === 1 : a === 1 && b === 1) rgba = [46, 90, 172, 105];
     else rgba = (a + b) % 2 ? [23, 32, 43, 26] : [255, 255, 255, 18];
     img.data.set(rgba, 4 * k);
   }
@@ -188,8 +202,8 @@ function drawCodeLabels(ctx, plot, labels) {
   ctx.textAlign = "center"; ctx.textBaseline = "middle";
   for (const l of labels) {
     const [X, Y] = plot.toScreen(l.x, l.y);
-    const txt = `(${l.a === 7 ? "?" : l.a},${l.b === 7 ? "?" : l.b})`;
-    const is11 = l.a === 1 && l.b === 1;
+    const txt = l.single ? String(l.a) : `(${l.a === 7 ? "?" : l.a},${l.b === 7 ? "?" : l.b})`;
+    const is11 = l.single ? l.a === 1 : l.a === 1 && l.b === 1;
     ctx.font = is11 ? "700 14px system-ui" : "12px system-ui";
     ctx.lineWidth = 3; ctx.strokeStyle = "rgba(255,255,255,0.85)";
     ctx.strokeText(txt, X, Y);
@@ -425,10 +439,7 @@ pages.review = {
       r.spectators.map(sp => h("div", {}, h("b", {}, sp.gate), ` at ${sp.voltage != null ? V4(sp.voltage) + " V" : "unknown voltage"}: `,
         sp.status === "verified" ? h("span", { class: "flag ok" }, "one electron (consistent with an earlier scan)") : h("span", { class: "flag" }, sp.status)))) : null;
 
-    const teach = (r.kind || "PvP") !== "PvP" ? h("div", { class: "panel small" }, h("h2", {}, "Teach the model"),
-      h("p", { class: "small muted" }, `Labelling ${KIND_LABEL[r.kind] || r.kind} scans in the GUI is not available yet. Labelled scans can be sent with the ChargeCell API (docs/PROTOCOL.md).`),
-      meta.source === "virtual_device" ? h("button", { onclick: e => this.reveal(e) }, "Reveal the true answer") : null) :
-      h("div", { class: "panel" }, h("h2", {}, "Teach the model"),
+    const teach = h("div", { class: "panel" }, h("h2", {}, "Teach the model"),
       h("p", { class: "small muted" }, "Your corrections become training data. Accept the result if it is right, or fix it in the labeller."),
       h("div", { class: "row" },
         h("button", { onclick: () => this.accept() }, "Accept as label"),
@@ -542,11 +553,9 @@ pages.label = {
     this.tool = "a";
     this.showCells = true;
     this.undoStack = []; this.redoStack = [];
-    const toolBtn = (t, label, key, cls) => h("button", { class: `tool-${cls}`, "data-tool": t, onclick: () => this.setTool(t), title: `Shortcut: ${key}` }, label, " ", h("kbd", {}, key));
-    this.tools = h("div", { class: "seg" },
-      toolBtn("v", "Select / move", "V", "v"), toolBtn("a", "Dot A boundary", "A", "a"),
-      toolBtn("b", "Dot B boundary", "B", "b"), toolBtn("s", "Spectator line", "S", "s"),
-      toolBtn("e", "Sensor artefact", "E", "e"));
+    this.tools = h("div", { class: "seg" });
+    this.kind = "PvP";
+    this.buildTools();
     this.bar = plotBar(this.plot, [h("label", { class: "check" }, h("input", { type: "checkbox", checked: true,
       onchange: e => { this.showCells = e.target.checked; this.plot.render(); } }), "Cells")]);
     this.side = h("div", { class: "stack" });
@@ -571,6 +580,20 @@ pages.label = {
     this.setTool("a");
   },
 
+  // tools per scan kind: PvT scans have one dot, whose loading lines are drawn along the
+  // plunger axis (dot-A boundaries if the plunger is on x, dot-B boundaries if it is on y)
+  buildTools() {
+    const toolBtn = (t, label, key, cls) => h("button", { class: `tool-${cls}`, "data-tool": t, onclick: () => this.setTool(t), title: `Shortcut: ${key}` }, label, " ", h("kbd", {}, key));
+    const kind = this.kind;
+    const dots = kind === "PvT"
+      ? [toolBtn(this.loadTool || "a", "Loading line", "L", this.loadTool || "a")]
+      : kind === "tiebar"
+        ? [toolBtn("a", "Dot A 1\u21922", "A", "a"), toolBtn("b", "Dot B 0\u21921", "B", "b")]
+        : [toolBtn("a", "Dot A boundary", "A", "a"), toolBtn("b", "Dot B boundary", "B", "b")];
+    this.tools.replaceChildren(toolBtn("v", "Select / move", "V", "v"), ...dots,
+      toolBtn("s", "Spectator line", "S", "s"), toolBtn("e", "Sensor artefact", "E", "e"));
+  },
+
   async enter(id) {
     await loadScanList();
     this.queue = await api("/api/label_queue");
@@ -581,14 +604,13 @@ pages.label = {
     this.id = id;
     this.picker.update(id);
     this.scan = await getScan(id);
-    if ((this.scan.meta.kind || "PvP") !== "PvP") {
-      this.ann = null; this.cells = null; this.cellLabels = null;
-      this.plot.setScan(this.scan);
-      this.side.replaceChildren(h("div", { class: "panel" }, h("h2", {}, "Not available yet"),
-        h("p", {}, `This is a ${KIND_LABEL[this.scan.meta.kind] || this.scan.meta.kind} scan. The labeller draws plunger-vs-plunger labels only; labels for this kind can be sent with the ChargeCell API (docs/PROTOCOL.md).`)));
-      return;
-    }
     const d = await api(`/api/scans/${encodeURIComponent(id)}/annotation`);
+    this.kind = this.scan.meta.kind || "PvP";
+    this.pOnX = d.plunger_on_x !== false;
+    this.loadTool = this.pOnX ? "a" : "b";
+    this.picking = null;
+    this.buildTools();
+    this.setTool(this.kind === "PvT" ? this.loadTool : "a");
     this.ann = d.annotation;
     if (!this.ann.annotator) this.ann.annotator = annotatorName();
     this.historyCount = d.history;
@@ -603,10 +625,11 @@ pages.label = {
   setPreview(d) {
     this.suggestion = d.suggestion;
     const code = decodeU8(d.occ_code);
-    const sc = this.scan;
+    const sc = this.scan, single = this.kind === "PvT";
     const ext = [sc.x[0], sc.x[sc.nx - 1], sc.y[0], sc.y[sc.ny - 1]];
-    this.cells = codeImage(code, sc.nx, sc.ny);
-    this.cellLabels = codeLabels(code, sc.nx, sc.ny, ext, 0.008);
+    this.cells = codeImage(code, sc.nx, sc.ny, single);
+    this.cellLabels = codeLabels(code, sc.nx, sc.ny, ext, 0.008)
+      .filter(l => !single || l.a !== 7).map(l => single ? { ...l, single: true } : l);
     this.cellExtent = ext;
   },
 
@@ -655,6 +678,18 @@ pages.label = {
   },
 
   onDown(p, e) {
+    if (this.picking) {                     // PvT: set an end of the clean tunnel-gate range
+      this.snapshot();
+      const T = this.pOnX ? p.y : p.x;
+      const rng = [...(this.ann.clean_T || [null, null])];
+      rng[this.picking === "lo" ? 0 : 1] = T;
+      if (rng[0] != null && rng[1] != null && rng[0] > rng[1]) rng.reverse();
+      this.ann.clean_T = rng;
+      this.picking = null;
+      this.canvas.style.cursor = this.tool === "v" ? "default" : "crosshair";
+      this.changed();
+      return true;
+    }
     if (this.tool === "v") {
       const hit = this.hit(p);
       this.selected = hit ? { t: hit.t, idx: hit.idx } : null;
@@ -719,7 +754,8 @@ pages.label = {
     if ((e.ctrlKey || e.metaKey) && k === "z") { e.preventDefault(); e.shiftKey ? this.redo() : this.undo(); return; }
     if ((e.ctrlKey || e.metaKey) && k === "s") { e.preventDefault(); this.save(false); return; }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
-    if (["v", "a", "b", "s", "e"].includes(k)) { this.setTool(k); e.preventDefault(); }
+    if (this.kind === "PvT" && ["a", "b", "l"].includes(k)) { this.setTool(this.loadTool); e.preventDefault(); }
+    else if (["v", "a", "b", "s", "e"].includes(k)) { this.setTool(k); e.preventDefault(); }
     else if (k === "g") { this.bar.setMode(this.plot.mode === "signal" ? "gradient" : "signal"); }
     else if (k === "enter") { this.finish(); e.preventDefault(); }
     else if (k === "escape") { if (this.active) this.finish(); this.selected = null; this.plot.render(); }
@@ -745,6 +781,7 @@ pages.label = {
       plot.drawGridImage(this.cells, this.cellExtent);
       drawCodeLabels(ctx, plot, this.cellLabels || []);
     }
+    if (this.kind === "PvT") this.drawCleanRange(ctx, plot);
     for (const [t, key] of Object.entries(TOOL_KEY)) {
       (this.ann[key] || []).forEach((poly, idx) => {
         const sel = this.selected && this.selected.t === t && this.selected.idx === idx;
@@ -764,10 +801,38 @@ pages.label = {
     }
   },
 
+  // PvT: shade the tunnel-gate values where electrons do not load cleanly
+  drawCleanRange(ctx, plot) {
+    const rng = this.ann.clean_T;
+    if (!rng || (rng[0] == null && rng[1] == null)) return;
+    const sc = this.scan, onX = this.pOnX;
+    const Tmin = onX ? sc.y[0] : sc.x[0], Tmax = onX ? sc.y[sc.ny - 1] : sc.x[sc.nx - 1];
+    const Pmin = onX ? sc.x[0] : sc.y[0], Pmax = onX ? sc.x[sc.nx - 1] : sc.y[sc.ny - 1];
+    const pt = (P, T) => onX ? plot.toScreen(P, T) : plot.toScreen(T, P);
+    const band = (t0, t1, fill, text) => {
+      const [X0, Y0] = pt(Pmin, t0), [X1, Y1] = pt(Pmax, t1);
+      ctx.fillStyle = fill;
+      ctx.fillRect(Math.min(X0, X1), Math.min(Y0, Y1), Math.abs(X1 - X0), Math.abs(Y1 - Y0));
+      const [Xm, Ym] = pt(Pmin + 0.5 * (Pmax - Pmin), 0.5 * (t0 + t1));
+      ctx.fillStyle = "#7A4A00"; ctx.font = "600 12px system-ui"; ctx.textAlign = "center";
+      ctx.fillText(text, Xm, Ym);
+    };
+    const [lo, hi] = rng;
+    if (lo != null && lo > Tmin) band(Tmin, Math.min(lo, Tmax), "rgba(168,100,0,0.14)", "tunnel gate too closed");
+    if (hi != null && hi < Tmax) band(Math.max(hi, Tmin), Tmax, "rgba(168,50,42,0.12)", "tunnel gate too open");
+    ctx.strokeStyle = "#A86400"; ctx.lineWidth = 2; ctx.setLineDash([7, 4]);
+    for (const T of [lo, hi]) {
+      if (T == null) continue;
+      const [X0, Y0] = pt(Pmin, T), [X1, Y1] = pt(Pmax, T);
+      ctx.beginPath(); ctx.moveTo(X0, Y0); ctx.lineTo(X1, Y1); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  },
+
   updateSuggestion() {
     if (!this.sugEl) return;
     const s = this.suggestion;
-    this.sugEl.replaceChildren(s ? h("span", {}, "From your lines: ", h("b", {}, SHORT_STATUS[s.status]), ` (${REASON_LABEL[s.reason]}) `,
+    this.sugEl.replaceChildren(s ? h("span", {}, "From your lines: ", h("b", {}, SHORT_STATUS[s.status]), ` (${reasonLabel(this.kind, s.reason)}) `,
       (this.ann.status !== s.status || this.ann.reason !== s.reason) ? h("button", { onclick: () => { this.ann.status = s.status; this.ann.reason = s.reason; this.renderSide(); } }, "Use this") : null) : "");
   },
 
@@ -780,27 +845,57 @@ pages.label = {
       }, v === null ? "Unknown" : String(v))));
       return h("div", {}, h("div", { class: "small", style: "margin-bottom:4px" }, label), seg, h("div", { class: "small muted", style: "margin-top:3px" }, help));
     };
+    const kind = this.kind;
     const statusSeg = h("div", { class: "stack", style: "gap:4px" },
       ...["FOUND", "NOT_IN_WINDOW", "UNINTERPRETABLE"].map(st => h("label", { class: "check" },
         h("input", { type: "radio", name: "ann-status", checked: ann.status === st, onchange: () => {
           ann.status = st;
           const s = this.suggestion;
           if (s && s.status === st) ann.reason = s.reason;
-          else if (!REASONS_BY_STATUS[st].includes(ann.reason)) ann.reason = REASONS_BY_STATUS[st][0];
+          else if (!reasonsFor(kind, st).includes(ann.reason)) ann.reason = reasonsFor(kind, st)[0];
           this.renderSide();
-        } }), h("span", { class: `pill ${st}` }, STATUS_LABEL[st]))));
+        } }), h("span", { class: `pill ${st}` }, statusLabel(kind, st)))));
     const reasonSel = h("select", { disabled: !ann.status, onchange: e => { ann.reason = e.target.value; } },
-      (REASONS_BY_STATUS[ann.status] || []).map(r => h("option", { value: r, selected: ann.reason === r }, REASON_LABEL[r])));
+      reasonsFor(kind, ann.status).map(r => h("option", { value: r, selected: ann.reason === r }, reasonLabel(kind, r))));
     this.sugEl = h("div", { class: "small" });
     const nA = (ann.a_boundaries || []).length, nB = (ann.b_boundaries || []).length;
-    this.side.replaceChildren(
-      h("div", { class: "panel stack" },
-        h("h2", { style: "margin:0" }, "Electron counts"),
+    const extras = `${(ann.spectator_lines || []).length} spectator, ${(ann.sensor_lines || []).length} sensor line(s).`;
+    let counts;
+    if (kind === "PvT") {
+      const key = this.pOnX ? "a" : "b", P = this.pOnX ? sc.xLabel : sc.yLabel, T = this.pOnX ? sc.yLabel : sc.xLabel;
+      const nL = (ann[`${key}_boundaries`] || []).length;
+      counts = h("div", { class: "panel stack" },
+        h("h2", { style: "margin:0" }, "Loading lines"),
         h("p", { class: "small muted", style: "margin:0" },
-          `Draw each dot A boundary bottom to top (it follows the ${sc.xLabel} line and its interdot jogs), and each dot B boundary left to right. Then say how many electrons sit left of / below them.`),
-        offset("a_offset", `Dot A (${sc.xLabel}) left of all A boundaries`, "0 = empty region visible"),
-        offset("b_offset", `Dot B (${sc.yLabel}) below all B boundaries`, "Unknown if no empty region is in view"),
-        h("div", { class: "small muted" }, `${nA} A boundar${nA === 1 ? "y" : "ies"}, ${nB} B boundar${nB === 1 ? "y" : "ies"}, ${(ann.spectator_lines || []).length} spectator, ${(ann.sensor_lines || []).length} sensor line(s).`)),
+          `Draw each loading line of the dot under ${P} (where it gains an electron) ${this.pOnX ? "from bottom to top" : "from left to right"}, following it across the ${T} range. Then say how many electrons the dot holds ${this.pOnX ? "left of" : "below"} the first line.`),
+        offset(`${key}_offset`, `Electrons ${this.pOnX ? "left of" : "below"} the first loading line`, "0 = the empty dot is visible (at least an electron spacing of it)"),
+        h("div", { class: "small muted" }, `${nL} loading line${nL === 1 ? "" : "s"}, ${extras}`));
+      const rng = ann.clean_T || [null, null];
+      const setEnd = (k, v) => { this.snapshot(); const r = [...(ann.clean_T || [null, null])]; r[k] = v === "" ? null : Number(v); ann.clean_T = r; this.changed(); };
+      const endField = (k, label) => h("label", {}, label, h("div", { class: "row", style: "gap:6px;flex-wrap:nowrap" },
+        h("input", { type: "number", step: "any", style: "width:9em", value: rng[k] == null ? "" : String(Number(rng[k].toFixed(6))),
+          onchange: e => setEnd(k, e.target.value) }), h("span", { class: "small" }, "V"),
+        h("button", { onclick: () => { this.picking = k ? "hi" : "lo"; this.canvas.style.cursor = "cell"; toast(`Click on the plot at the ${T} value where electrons ${k ? "stop" : "start"} loading cleanly.`); } }, "Pick on plot")));
+      this.rangeEl = h("div", { class: "panel stack" },
+        h("h2", { style: "margin:0" }, `Clean ${T} range`),
+        h("p", { class: "small muted", style: "margin:0" },
+          `Where electrons load cleanly: the loading lines are sharp and continuous. Below this range they fade or jump sideways (${T} too closed); above it they smear out (${T} too open). Leave a field empty if the clean range continues beyond the window.`),
+        endField(0, "Clean from"), endField(1, "Clean up to"),
+        h("div", {}, h("button", { onclick: () => { this.snapshot(); ann.clean_T = null; this.changed(); } }, "Clear range")));
+    } else {
+      const tb = kind === "tiebar";
+      counts = h("div", { class: "panel stack" },
+        h("h2", { style: "margin:0" }, "Electron counts"),
+        h("p", { class: "small muted", style: "margin:0" }, tb
+          ? `Draw dot A's boundary where it goes from 1 to 2 electrons, bottom to top: along the ${sc.xLabel} line, along the tie bar, and on. Draw dot B's 0\u21921 boundary left to right, through the same tie bar. The counts below are those of a tie-bar zoom; change them only if your window shows other cells.`
+          : `Draw each dot A boundary bottom to top (it follows the ${sc.xLabel} line and its interdot jogs), and each dot B boundary left to right. Then say how many electrons sit left of / below them.`),
+        offset("a_offset", `Dot A (${sc.xLabel}) left of all A boundaries`, tb ? "1 in a tie-bar zoom" : "0 = empty region visible"),
+        offset("b_offset", `Dot B (${sc.yLabel}) below all B boundaries`, tb ? "0 in a tie-bar zoom" : "Unknown if no empty region is in view"),
+        h("div", { class: "small muted" }, `${nA} A boundar${nA === 1 ? "y" : "ies"}, ${nB} B boundar${nB === 1 ? "y" : "ies"}, ${extras}`));
+      this.rangeEl = null;
+    }
+    this.side.replaceChildren(
+      ...[counts, this.rangeEl].filter(Boolean),
       h("div", { class: "panel stack" },
         h("h2", { style: "margin:0" }, "Outcome"), statusSeg,
         h("label", {}, "Reason", reasonSel), this.sugEl,
@@ -824,7 +919,7 @@ pages.label = {
       h("div", { class: "panel" }, h("h2", {}, "Up next"),
         h("p", { class: "small muted", style: "margin:0" }, "Unlabelled scans, most uncertain first. These teach the model the most."),
         h("div", { class: "queue" }, (this.queue || []).map(q => h("a", { href: `#/label/${encodeURIComponent(q.id)}`, class: q.id === this.id ? "current" : "" },
-          h("span", {}, `${when(q.created)} ${q.x_gate}/${q.y_gate}`),
+          h("span", {}, `${when(q.created)} ${q.x_gate}/${q.y_gate}${(q.kind || "PvP") !== "PvP" ? " \u00b7 " + q.kind : ""}`),
           h("span", { class: `pill ${(q.analysis || {}).status || ""}` }, q.analysis ? SHORT_STATUS[q.analysis.status] : "not analysed"))))));
     this.updateSuggestion();
   },
@@ -845,8 +940,9 @@ pages.label = {
     if (!ann.status) { toast("Choose an outcome before saving.", "error"); return; }
     if (!ann.annotator) { toast("Add your name so labels can be traced.", "error"); return; }
     const s = this.suggestion;
-    if (ann.status === "FOUND" && s && s.status !== "FOUND" &&
-        !confirm("Your lines do not show a complete (1,1) cell with an empty region for both dots. Save as FOUND anyway?")) return;
+    const why = { PvT: "the empty dot, two loading lines and a clean tunnel-gate range", tiebar: "a complete tie bar inside the window" }[this.kind] ||
+      "a complete (1,1) cell with an empty region for both dots";
+    if (ann.status === "FOUND" && s && s.status !== "FOUND" && !confirm(`Your lines do not show ${why}. Save as FOUND anyway?`)) return;
     const d = await api(`/api/scans/${encodeURIComponent(this.id)}/annotation`, { method: "PUT", json: ann });
     this.historyCount = d.history;
     toast("Label saved");

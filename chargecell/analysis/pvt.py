@@ -391,3 +391,53 @@ def recommend_pvt(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: str,
     steps.append(window_step(scan, win["x"], win["y"], nx, ny))
     steps.append(f"Why: {basis}.")
     return rec
+
+
+def draft_annotation(ws: Workspace, scan: Scan, model_id: str | None = None) -> dict:
+    """The PvT model's reading of a scan as an editable label: loading lines (as dot-A
+    boundaries when the plunger is on x, dot-B boundaries when it is on y), the count left of
+    them if the empty dot is visible, and the clean tunnel-gate range."""
+    from ..labels import _indexed_boundaries, _offset, empty_annotation
+
+    cfg = ws.get_device(scan.device)
+    o, transposed = oriented(scan, cfg)
+    an = Analyzer.get(ws, model_id, kind="PvT")
+    p = an.predict(o, cfg.carrier)
+    S = an.size
+    grid = Grid.for_scan(o, S, cfg.carrier)
+    ny, nx = o.signal.shape
+    iy = np.clip(np.round(np.linspace(0, S - 1, ny)).astype(int), 0, S - 1)
+    ix = np.clip(np.round(np.linspace(0, S - 1, nx)).astype(int), 0, S - 1)
+    if cfg.carrier == "hole":
+        iy, ix = iy[::-1], ix[::-1]
+    occ = p["occ_p"].argmax(0)[iy][:, ix]              # plunger along x of the oriented scan
+    rows = row_regimes(p["regime_p"], p["lines_p"][0])
+    gb = band(rows, GOOD)
+    T_of = lambda j: float(grid.to_volts(0, j)[1])
+    if gb is not None:
+        lo = None if gb[0] == 0 else T_of(gb[0])
+        hi = None if gb[1] == S - 1 else T_of(gb[1])
+    elif (rows == SLOW).sum() >= (rows == OPEN).sum():
+        lo, hi = max(T_of(0), T_of(S - 1)), None       # all too slow
+    else:
+        lo, hi = None, min(T_of(0), T_of(S - 1))       # all too open
+    if hi is not None and lo is not None and hi < lo:
+        lo, hi = hi, lo
+    ref = bool(p["ref_p"][0] > 0.5)
+    ann = empty_annotation(scan.id, kind="PvT")
+    if transposed:                                    # back to the scan's own axes
+        bounds = _indexed_boundaries(occ.T, scan.x, scan.y, "x")
+        ann["b_boundaries"] = [poly for _, poly in bounds]
+        ann["b_offset"] = _offset(occ.T, bounds) if ref else None
+    else:
+        bounds = _indexed_boundaries(occ, scan.x, scan.y, "y")
+        ann["a_boundaries"] = [poly for _, poly in bounds]
+        ann["a_offset"] = _offset(occ, bounds) if ref else None
+    ann["clean_T"] = [lo, hi]
+    sp, rp = p["status_p"], p["reason_p"]
+    status = schema.STATUSES[int(np.argmax(sp))]
+    allowed = SPEC.reasons_for(status)
+    ann.update(status=status, reason=allowed[int(np.argmax(rp[[SPEC.reasons.index(r)
+                                                                  for r in allowed]]))],
+               origin=f"model:{an.model_id}")
+    return ann

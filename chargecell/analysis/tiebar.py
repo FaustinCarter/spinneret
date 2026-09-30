@@ -392,3 +392,41 @@ def recommend_tiebar(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: s
         steps.append("If it still does not show, go back to a plunger-plunger scan to find (1,1) "
                      "first; ChargeCell then suggests the tie-bar window itself.")
     return rec
+
+
+def draft_annotation(ws: Workspace, scan: Scan, model_id: str | None = None) -> dict:
+    """The tie-bar model's reading of a scan as an editable label: dot A's 1 -> 2 boundary
+    (through the tie bar) and dot B's 0 -> 1 boundary, from the predicted regions."""
+    from ..labels import _indexed_boundaries, _offset, empty_annotation
+
+    cfg = ws.get_device(scan.device)
+    an = Analyzer.get(ws, model_id, kind="tiebar")
+    p = an.predict(scan, cfg.carrier)
+    S = an.size
+    ny, nx = scan.signal.shape
+    iy = np.clip(np.round(np.linspace(0, S - 1, ny)).astype(int), 0, S - 1)
+    ix = np.clip(np.round(np.linspace(0, S - 1, nx)).astype(int), 0, S - 1)
+    if cfg.carrier == "hole":
+        iy, ix = iy[::-1], ix[::-1]
+    region = p["region_p"].argmax(0)[iy][:, ix]
+    other = region == 4
+    if other.all():
+        region = np.full(region.shape, 2)              # nothing recognised: all (1,0)
+    elif other.any():                                 # fill with the nearest known region
+        idx = ndimage.distance_transform_edt(other, return_distances=False, return_indices=True)
+        region = region[tuple(idx)]
+    na = np.array([1, 2, 1, 2])[region]               # (1,1) (2,0) (1,0) (2,1)
+    nb = np.array([1, 0, 0, 1])[region]
+    ba = _indexed_boundaries(na, scan.x, scan.y, "y")
+    bb = _indexed_boundaries(nb, scan.x, scan.y, "x")
+    ann = empty_annotation(scan.id, kind="tiebar")
+    ann.update(a_boundaries=[poly for _, poly in ba], b_boundaries=[poly for _, poly in bb],
+               a_offset=_offset(na, ba), b_offset=_offset(nb, bb))
+    sp, rp = p["status_p"], p["reason_p"]
+    spec = kinds.TIEBAR
+    status = schema.STATUSES[int(np.argmax(sp))]
+    allowed = spec.reasons_for(status)
+    ann.update(status=status, reason=allowed[int(np.argmax(rp[[spec.reasons.index(r)
+                                                                  for r in allowed]]))],
+               origin=f"model:{an.model_id}")
+    return ann

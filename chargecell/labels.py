@@ -24,13 +24,24 @@ from . import schema
 from .simulate.generator import boundary_masks
 
 
-def empty_annotation(scan_id: str, annotator: str = "") -> dict[str, Any]:
+def default_offsets(kind: str | None) -> tuple:
+    """Counts left of / below every boundary that a scan kind shows by definition: a tie-bar
+    zoom shows dot A with 1 -> 2 and dot B with 0 -> 1 electrons around the (1,1)-(2,0)
+    transition. Other kinds: unknown until the annotator says."""
+    return (1, 0) if kind == "tiebar" else (None, None)
+
+
+def empty_annotation(scan_id: str, annotator: str = "", kind: str | None = "PvP") -> dict[str, Any]:
+    a_off, b_off = default_offsets(kind)
     return {
         "scan_id": scan_id, "annotator": annotator, "created": schema.now_iso(),
-        "updated": schema.now_iso(), "status": None, "reason": None,
-        "a_boundaries": [], "b_boundaries": [], "a_offset": None, "b_offset": None,
+        "updated": schema.now_iso(), "status": None, "reason": None, "kind": kind or "PvP",
+        "a_boundaries": [], "b_boundaries": [], "a_offset": a_off, "b_offset": b_off,
         "spectator_lines": [], "sensor_lines": [], "notes": "", "origin": "manual",
         "reviewed": False,
+        # PvT only: tunnel-gate values (V) between which electrons load cleanly; None = the
+        # clean range extends beyond that side of the window (or is not marked)
+        "clean_T": None,
     }
 
 
@@ -118,8 +129,13 @@ def dense_from_annotation(ann: dict, xs: np.ndarray, ys: np.ndarray) -> dict:
     return dict(occ_a=occ_a, occ_b=occ_b, masks=masks, ref_a=bool(ref_a), ref_b=bool(ref_b))
 
 
-def suggest_status(ann: dict, xs: np.ndarray, ys: np.ndarray) -> dict:
+def suggest_status(ann: dict, xs: np.ndarray, ys: np.ndarray, kind: str | None = "PvP",
+                   plunger_on_x: bool = True) -> dict | None:
     """A status/reason suggestion derived from the geometry the annotator drew."""
+    if kind == "PvT":
+        return _suggest_pvt(ann, xs, ys, plunger_on_x)
+    if kind == "tiebar":
+        return _suggest_tiebar(ann, xs, ys)
     d = dense_from_annotation(ann, xs, ys)
     na = len(ann.get("a_boundaries", []))
     nb = len(ann.get("b_boundaries", []))
@@ -138,6 +154,100 @@ def suggest_status(ann: dict, xs: np.ndarray, ys: np.ndarray) -> dict:
     touches = (cell & edge).sum() / max(1, (ndimage.binary_dilation(cell) & ~cell).sum()
                                         + (cell & edge).sum())
     if touches > 0.25:
+        return {"status": schema.NOT_IN_WINDOW, "reason": "partially_visible"}
+    return {"status": schema.FOUND, "reason": "none"}
+
+
+# ---------------------------------------------------------------------------------------------
+# PvT and tie-bar labels
+# ---------------------------------------------------------------------------------------------
+# PvT: the loading lines of the dot under the plunger are drawn like dot-A boundaries when the
+# plunger is on x (like dot-B boundaries when it is on y), with the count left of (below) them
+# as the offset; ``clean_T`` marks where electrons load cleanly. Tie bar: dot A's 1 -> 2
+# boundary (through the tie bar) and dot B's 0 -> 1 boundary, offsets 1 and 0.
+
+def _pvt_parts(ann: dict, plunger_on_x: bool) -> tuple[list, int | None]:
+    key = "a" if plunger_on_x else "b"
+    return ann.get(f"{key}_boundaries", []), ann.get(f"{key}_offset")
+
+
+def pvt_regime_1d(ann: dict, T: np.ndarray) -> np.ndarray:
+    """Tunnel regime per tunnel-gate value: 0 too slow (below the clean range), 1 clean,
+    2 too open (above it); -1 when no clean range was marked."""
+    rng = ann.get("clean_T")
+    reg = np.full(len(T), schema.OCC_IGNORE, np.int8)
+    if not rng or (rng[0] is None and rng[1] is None):
+        return reg
+    lo, hi = rng
+    reg[:] = 1
+    if lo is not None:
+        reg[T < lo] = 0
+    if hi is not None:
+        reg[T > hi] = 2
+    return reg
+
+
+def pvt_dense(ann: dict, xs: np.ndarray, ys: np.ndarray, plunger_on_x: bool = True) -> dict:
+    """Dense PvT labels on the grid (xs, ys), in the scan's own orientation: the dot's
+    occupancy (-1 where unknown, and where the tunnel rate is too slow for electrons to follow),
+    the tunnel regime per pixel, and line masks for the PvT line families."""
+    d = dense_from_annotation(ann, xs, ys)
+    occ = d["occ_a"] if plunger_on_x else d["occ_b"]
+    load = d["masks"]["a"] if plunger_on_x else d["masks"]["b"]
+    reg1 = pvt_regime_1d(ann, ys if plunger_on_x else xs)
+    regime = (np.repeat(reg1[:, None], len(xs), 1) if plunger_on_x
+              else np.repeat(reg1[None, :], len(ys), 0))
+    occ = np.where(regime == 0, schema.OCC_IGNORE, occ)
+    bounds, off = _pvt_parts(ann, plunger_on_x)
+    return dict(occ=occ, regime=regime, ref=bool(off == 0 and len(bounds) > 0),
+                masks={"load": load, "spectator": d["masks"]["spectator"] & ~load,
+                       "sensor": d["masks"]["sensor"]})
+
+
+def _suggest_pvt(ann: dict, xs: np.ndarray, ys: np.ndarray, plunger_on_x: bool) -> dict:
+    bounds, off = _pvt_parts(ann, plunger_on_x)
+    T = ys if plunger_on_x else xs
+    reg = pvt_regime_1d(ann, T)
+    niw = schema.NOT_IN_WINDOW
+    if not bounds:
+        return {"status": niw, "reason": "no_transitions"}
+    if (reg == 0).all():
+        return {"status": niw, "reason": "tunnel_rate_too_low"}
+    if (reg == 2).all():
+        return {"status": niw, "reason": "reservoir_too_open"}
+    if off != 0:
+        return {"status": niw, "reason": "no_reference"}
+    if len(bounds) < 2:
+        return {"status": niw, "reason": "occupancy_too_low"}
+    if (reg == 1).sum() < 3:                      # not marked, or too few clean rows
+        slow = (reg == 0).sum() >= (reg == 2).sum()
+        return {"status": niw, "reason": "tunnel_rate_too_low" if slow else "reservoir_too_open"}
+    return {"status": schema.FOUND, "reason": "none"}
+
+
+def tiebar_dense(ann: dict, xs: np.ndarray, ys: np.ndarray) -> dict:
+    """Dense tie-bar labels: the region around the tie bar ((1,1), (2,0), (1,0), (2,1), other;
+    -1 where the counts are unknown) and line masks for the tie-bar line families."""
+    from .simulate.tiebar import region_map, tiebar_masks
+    d = dense_from_annotation(ann, xs, ys)
+    na, nb = d["occ_a"], d["occ_b"]
+    if (na < 0).all() or (nb < 0).all():
+        region = np.full(na.shape, schema.OCC_IGNORE, np.int8)
+        masks = {f: np.zeros(na.shape, bool) for f in ("a", "b", "tiebar", "interdot")}
+    else:
+        region = region_map(na, nb)
+        masks = tiebar_masks(na, nb)
+    masks["sensor"] = d["masks"]["sensor"]
+    return dict(region=region, masks=masks)
+
+
+def _suggest_tiebar(ann: dict, xs: np.ndarray, ys: np.ndarray) -> dict | None:
+    if ann.get("a_offset") is None or ann.get("b_offset") is None:
+        return None
+    tb = tiebar_dense(ann, xs, ys)["masks"]["tiebar"]
+    if not tb.any():
+        return {"status": schema.NOT_IN_WINDOW, "reason": "no_tiebar"}
+    if tb[0].any() or tb[-1].any() or tb[:, 0].any() or tb[:, -1].any():
         return {"status": schema.NOT_IN_WINDOW, "reason": "partially_visible"}
     return {"status": schema.FOUND, "reason": "none"}
 

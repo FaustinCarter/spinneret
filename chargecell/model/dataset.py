@@ -30,7 +30,7 @@ import torch
 from torch.utils.data import Dataset
 
 from .. import kinds, schema
-from ..labels import dense_from_annotation
+from ..labels import dense_from_annotation, pvt_dense, tiebar_dense
 from ..preprocess import dilate, features, pack_lines, resample
 from ..simulate.generator import boundary_masks, generate_sample
 from ..storage import Workspace, write_json
@@ -163,10 +163,45 @@ def load_synthetic(ws: Workspace, names: list[str], size: int, kind: str = "PvP"
 # ---------------------------------------------------------------------------------------------
 # real (annotated) data
 # ---------------------------------------------------------------------------------------------
+def plunger_on_x(scan, cfg) -> bool:
+    """PvT scans: is the plunger on the x axis (the model's orientation)?"""
+    from ..analysis.pvt import is_tunnel_gate
+    return not (is_tunnel_gate(scan.x_gate, cfg) and not is_tunnel_gate(scan.y_gate, cfg))
+
+
+def _real_sample(scan, ann: dict, size: int, kind: str, cfg) -> dict:
+    """Arrays for one labelled scan, in the layout of the kind's synthetic shards."""
+    spec = kinds.get(kind)
+    xs = np.linspace(scan.x[0], scan.x[-1], size)
+    ys = np.linspace(scan.y[0], scan.y[-1], size)
+    sig = resample(scan.signal, size, 1)
+    if kind == "PvT":
+        on_x = plunger_on_x(scan, cfg)
+        d = pvt_dense(ann, xs, ys, on_x)
+        occ, regime, masks = d["occ"], d["regime"], d["masks"]
+        if not on_x:                        # the model sees the plunger on x
+            sig, occ, regime = sig.T, occ.T, regime.T
+            masks = {k: v.T for k, v in masks.items()}
+        rows = masks["load"].any(1)         # regime supervised on rows with a transition
+        regime = np.where(rows[:, None], regime, schema.OCC_IGNORE)
+        occ = np.where(occ < 0, -1, np.minimum(occ, 4))
+        return dict(signal=sig, occ=np.stack([occ, regime]).astype(np.int8),
+                    lines=pack_lines(masks, spec.line_families),
+                    ref=np.array([d["ref"]], np.int8))
+    if kind == "tiebar":
+        d = tiebar_dense(ann, xs, ys)
+        return dict(signal=sig, occ=d["region"][None].astype(np.int8),
+                    lines=pack_lines(d["masks"], spec.line_families), ref=np.zeros(0, np.int8))
+    d = dense_from_annotation(ann, xs, ys)
+    occ = np.stack([d["occ_a"], d["occ_b"]])
+    occ = np.where(occ < 0, -1, np.minimum(occ, 4)).astype(np.int8)
+    return dict(signal=sig, occ=occ, lines=pack_lines(d["masks"]),
+                ref=np.array([d["ref_a"], d["ref_b"]], np.int8))
+
+
 def real_arrays(ws: Workspace, size: int, only_reviewed: bool = False, kind: str = "PvP") -> dict:
-    """Labelled real scans of one kind. Only PvP labels can be drawn in the labeller so far."""
-    if kind != "PvP":
-        return {}
+    """Labelled real scans of one kind, as arrays like the kind's synthetic shards."""
+    spec = kinds.get(kind)
     cols: dict[str, list] = {k: [] for k in ("signal", "occ", "lines", "status", "reason", "ref")}
     metas, groups = [], []
     for sid in ws.labelled_scan_ids():
@@ -174,19 +209,18 @@ def real_arrays(ws: Workspace, size: int, only_reviewed: bool = False, kind: str
         if only_reviewed and not ann.get("reviewed"):
             continue
         scan = ws.load_scan(sid)
-        if scan.kind != "PvP":             # other scan kinds are stored for future models
+        if (scan.kind or "PvP") != kind:
             continue
-        xs = np.linspace(scan.x[0], scan.x[-1], size)
-        ys = np.linspace(scan.y[0], scan.y[-1], size)
-        d = dense_from_annotation(ann, xs, ys)
-        occ = np.stack([d["occ_a"], d["occ_b"]])
-        occ = np.where(occ < 0, -1, np.minimum(occ, 4)).astype(np.int8)
-        cols["signal"].append(resample(scan.signal, size, 1).astype(np.float16))
-        cols["occ"].append(occ)
-        cols["lines"].append(pack_lines(d["masks"]))
+        reason = ann.get("reason") or "none"
+        if reason not in spec.reasons:      # a label saved for another kind: skip it
+            continue
+        arr = _real_sample(scan, ann, size, kind, ws.get_device(scan.device))
+        cols["signal"].append(arr["signal"].astype(np.float16))
+        cols["occ"].append(arr["occ"])
+        cols["lines"].append(arr["lines"])
         cols["status"].append(schema.STATUSES.index(ann["status"]))
-        cols["reason"].append(schema.REASONS.index(ann.get("reason") or "none"))
-        cols["ref"].append(np.array([d["ref_a"], d["ref_b"]], np.int8))
+        cols["reason"].append(spec.reasons.index(reason))
+        cols["ref"].append(arr["ref"])
         metas.append(dict(scan_id=sid, status=ann["status"], reason=ann.get("reason"),
                           device=scan.device, cooldown=scan.cooldown))
         groups.append(f"{scan.device}|{scan.cooldown}")

@@ -105,10 +105,22 @@ def test_training_other_kinds(ws):
     from chargecell.model.dataset import build_synthetic
     from chargecell.model.infer import Analyzer
     from chargecell.model.train import TrainConfig, train
+    from chargecell import labels
     for kind, gates in (("PvT", ("P1", "T1")), ("tiebar", ("P1", "P2"))):
         build_synthetic(ws, f"tiny-{kind}", 24, size=32, seed=2, kind=kind)
+        # one labelled real scan of the kind trains alongside the synthetic data
+        vd = virtual.create(ws, seed=4)
+        real = virtual.measure(ws, vd["id"], gates[0], gates[1],
+                               *virtual.start_window(vd, gates, points=40), kind=kind)
+        ws.save_scan(real)
+        ann = labels.empty_annotation(real.id, "test", kind=kind)
+        ann.update(status="NOT_IN_WINDOW", reason=kinds.get(kind).not_in_window[0],
+                   clean_T=[float(real.y[5]), None] if kind == "PvT" else None)
+        ws.save_annotation(real.id, ann)
         mid = train(ws, TrainConfig(synthetic=[f"tiny-{kind}"], kind=kind, size=32, base=8,
                                     epochs=1, ensemble=1, batch_size=8))
+        card = next(m for m in ws.list_models() if m["id"] == mid)
+        assert card["data"]["n_real_train"] == 1
         assert ws.active_model_id(kind) == mid and ws.active_model_id("PvP") is None
         Analyzer._cache.clear()
         vd = virtual.create(ws, seed=3)

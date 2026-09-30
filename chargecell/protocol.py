@@ -30,7 +30,7 @@ from typing import Any, Literal, Optional, Union
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from . import labels, schema
+from . import kinds, labels, schema
 from .config import DeviceConfig
 from .schema import Scan
 
@@ -158,29 +158,36 @@ class Label(_Strict):
     b_offset: Optional[int] = Field(None, ge=0, le=4)
     spectator_lines: list[Polyline] = Field(default_factory=list)
     sensor_lines: list[Polyline] = Field(default_factory=list)
+    clean_T: Optional[tuple[Optional[float], Optional[float]]] = Field(
+        None, description="PvT only: tunnel-gate values between which electrons load cleanly; "
+                          "null for a side where the clean range continues beyond the window")
     annotator: str = ""
     reviewed: bool = False
     notes: str = ""
 
-    @model_validator(mode="after")
-    def _reason_fits(self):
-        allowed = {schema.FOUND: ["none"], schema.NOT_IN_WINDOW: schema.NOT_IN_WINDOW_REASONS,
-                   schema.UNINTERPRETABLE: schema.UNINTERPRETABLE_REASONS}[self.status]
+    def check_reason(self, kind: str) -> None:
+        allowed = kinds.get(kind).reasons_for(self.status)
         if self.reason is not None and self.reason not in allowed:
-            raise ValueError(f"reason for {self.status} must be one of {allowed}")
-        return self
+            raise ValueError(f"reason for a {kind} scan with status {self.status} must be one "
+                             f"of {list(allowed)}")
 
-    def to_annotation(self, scan_id: str, voltage_unit: str) -> dict:
+    def to_annotation(self, scan_id: str, voltage_unit: str, kind: str = "PvP") -> dict:
         k = 1000.0 if voltage_unit == "mV" else 1.0
         conv = lambda polys: [[[px / k, py / k] for px, py in p] for p in polys]
-        ann = labels.empty_annotation(scan_id, self.annotator)
+        ann = labels.empty_annotation(scan_id, self.annotator, kind=kind)
         ann.update(status=self.status, reason=self.reason or (
                        "none" if self.status == schema.FOUND else None),
                    a_boundaries=conv(self.a_boundaries), b_boundaries=conv(self.b_boundaries),
-                   a_offset=self.a_offset, b_offset=self.b_offset,
                    spectator_lines=conv(self.spectator_lines),
                    sensor_lines=conv(self.sensor_lines), notes=self.notes,
                    origin="api", reviewed=self.reviewed)
+        # offsets: as given; a tie-bar scan without them uses its defaults (1 and 0)
+        if self.a_offset is not None or kind != "tiebar":
+            ann["a_offset"] = self.a_offset
+        if self.b_offset is not None or kind != "tiebar":
+            ann["b_offset"] = self.b_offset
+        if self.clean_T is not None:
+            ann["clean_T"] = [None if v is None else v / k for v in self.clean_T]
         return ann
 
 
@@ -219,6 +226,12 @@ class Request(_Strict):
     scan: ScanIn
     label: Optional[Label] = Field(None, description="only for submitting training data")
     options: Options = Field(default_factory=Options)
+
+    @model_validator(mode="after")
+    def _label_fits_kind(self):
+        if self.label is not None:
+            self.label.check_reason(self.scan.kind if self.scan.kind in kinds.KINDS else "PvP")
+        return self
 
 
 # ---------------------------------------------------------------------------------------------
@@ -456,7 +469,7 @@ def handle_submit(ws, req: Request) -> dict:
     ws.save_scan(scan)
     labelled = req.label is not None
     if labelled:
-        ann = req.label.to_annotation(scan.id, req.scan.voltage_unit)
+        ann = req.label.to_annotation(scan.id, req.scan.voltage_unit, scan.kind or "PvP")
         ws.save_annotation(scan.id, ann)
     return {"protocol": PROTOCOL, "request_id": req.request_id, "scan_id": scan.id,
             "kind": scan.kind, "labelled": labelled}

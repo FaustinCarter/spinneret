@@ -20,6 +20,7 @@ from ..analysis.decide import analyze, prediction_for_annotation
 from ..config import DeviceConfig
 from ..importers.generic import load_any
 from ..jobs import JobManager
+from ..model.dataset import plunger_on_x
 from ..model.infer import Analyzer
 from ..storage import Workspace
 
@@ -139,18 +140,36 @@ def create_app(workspace: str | Path) -> FastAPI:
 
     # ------------------------------------------------------------------ annotation
     def _preview(s, ann: dict) -> dict:
+        """Electron counts implied by the drawn lines, on the scan's grid (a*8 + b, 7 =
+        unknown; PvT: the plunger dot's count in a), and a suggested outcome."""
+        kind = s.kind or "PvP"
+        on_x = kind != "PvT" or plunger_on_x(s, ws.get_device(s.device))
         ra, rb = labels.relative_occupancy(ann, s.x, s.y)
         a_off, b_off = ann.get("a_offset"), ann.get("b_offset")
         ca = np.where(a_off is None, 7, np.minimum(ra + (a_off or 0), 6))
         cb = np.where(b_off is None, 7, np.minimum(rb + (b_off or 0), 6))
+        if kind == "PvT":                   # one dot: its count, whichever axis it is on
+            ca, cb = (ca if on_x else cb), np.full(ca.shape, 7)
         code = (ca * 8 + cb).astype(np.uint8)
-        return dict(occ_code=base64.b64encode(code.tobytes()).decode(),
-                    suggestion=labels.suggest_status(ann, s.x, s.y))
+        return dict(occ_code=base64.b64encode(code.tobytes()).decode(), plunger_on_x=on_x,
+                    suggestion=labels.suggest_status(ann, s.x, s.y, kind, on_x))
+
+    def _check_label(s, ann: dict) -> None:
+        spec = kinds.get(s.kind or "PvP")
+        if ann.get("status") and ann["status"] not in schema.STATUSES:
+            raise HTTPException(400, f"status must be one of {schema.STATUSES}")
+        if ann.get("reason") and ann.get("status") and \
+                ann["reason"] not in spec.reasons_for(ann["status"]):
+            raise HTTPException(400, f"reason for a {spec.name} scan with status {ann['status']} "
+                                     f"must be one of {list(spec.reasons_for(ann['status']))}")
+        rng = ann.get("clean_T")
+        if rng is not None and (not isinstance(rng, (list, tuple)) or len(rng) != 2):
+            raise HTTPException(400, "clean_T must be [low, high] (volts, either may be null)")
 
     @app.get("/api/scans/{scan_id}/annotation")
     def get_annotation(scan_id: str):
         s = scan_or_404(scan_id)
-        ann = ws.load_annotation(scan_id) or labels.empty_annotation(scan_id)
+        ann = ws.load_annotation(scan_id) or labels.empty_annotation(scan_id, kind=s.kind)
         return _clean(dict(annotation=ann, history=len(ws.annotation_history(scan_id)),
                            **_preview(s, ann)))
 
@@ -161,11 +180,9 @@ def create_app(workspace: str | Path) -> FastAPI:
     @app.put("/api/scans/{scan_id}/annotation")
     def put_annotation(scan_id: str, ann: dict = Body(...)):
         s = scan_or_404(scan_id)
-        if ann.get("status") and ann["status"] not in schema.STATUSES:
-            raise HTTPException(400, f"status must be one of {schema.STATUSES}")
-        if ann.get("reason") and ann["reason"] not in schema.REASONS:
-            raise HTTPException(400, "unknown reason code")
+        _check_label(s, ann)
         ann["scan_id"] = scan_id
+        ann["kind"] = s.kind or "PvP"
         ann["updated"] = schema.now_iso()
         ann.setdefault("created", ann["updated"])
         ws.save_annotation(scan_id, ann)
@@ -184,10 +201,18 @@ def create_app(workspace: str | Path) -> FastAPI:
     def draft(scan_id: str):
         s = scan_or_404(scan_id)
         try:
-            pred = prediction_for_annotation(ws, s)
+            if s.kind == "PvT":
+                from ..analysis.pvt import draft_annotation
+                ann = draft_annotation(ws, s)
+            elif s.kind == "tiebar":
+                from ..analysis.tiebar import draft_annotation
+                ann = draft_annotation(ws, s)
+            else:
+                pred = prediction_for_annotation(ws, s)
+                ann = labels.annotation_from_prediction(pred, s.x, s.y, scan_id,
+                                                        pred["model_id"])
         except RuntimeError as e:
             raise HTTPException(409, str(e))
-        ann = labels.annotation_from_prediction(pred, s.x, s.y, scan_id, pred["model_id"])
         return _clean(dict(annotation=ann, **_preview(s, ann)))
 
     @app.get("/api/label_queue")
@@ -198,8 +223,6 @@ def create_app(workspace: str | Path) -> FastAPI:
         for sid in ws.scan_ids():
             s = ws.scan_summary(sid)
             if s["label"] and s["label"].get("status"):
-                continue
-            if (s.get("kind") or "PvP") != "PvP":        # the labeller draws PvP labels only
                 continue
             unc = (s["analysis"] or {}).get("uncertainty")
             rows.append((-(unc if unc is not None else 0.5), s))
