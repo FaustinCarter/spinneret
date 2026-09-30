@@ -418,6 +418,7 @@ def create_app(workspace: str | Path) -> FastAPI:
             if g in vd["voltage_state"] and g not in (win["x_gate"], win["y_gate"]):
                 vd["voltage_state"][g] += d
         ws.save_virtual_device(vd_id, vd)
+        virtual.follow_fix(ws, vd_id, res, win)         # e.g. retune the sensor, as advised
         kind = "tiebar" if window in ("tiebar_window", "retune_window") else s.kind
         try:
             new = virtual.measure(ws, vd_id, win["x_gate"], win["y_gate"], tuple(win["x"]),

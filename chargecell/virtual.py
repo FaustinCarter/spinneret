@@ -21,7 +21,7 @@ from . import schema
 from .config import DeviceConfig
 from .schema import Scan
 from .simulate.generator import Window, oracle, render, sample_artifacts, sample_device
-from .simulate.physics import DeviceParams, scale_voltages
+from .simulate.physics import DeviceParams, classical_ground_state, scale_voltages
 from .simulate.pvt import (PvTParams, PvTWindow, line_position, pvt_oracle, render_pvt,
                            sample_pvt_params)
 from .simulate.tiebar import tiebar_geometry, tiebar_oracle
@@ -64,7 +64,9 @@ def create(ws: Workspace, seed: int | None = None, preset: str = "hrl_linear",
     vd_id = f"vd-{seed}"
     name = f"practice-{seed}"
     vd = dict(id=vd_id, device=name, preset=preset, seed=seed, params=p.to_dict(), pvt=pvt,
-              exchange=exchange, voltage_state=start, created=schema.now_iso(), measurements=0)
+              exchange=exchange, voltage_state=start, created=schema.now_iso(), measurements=0,
+              snr_boost=1.0)
+    _tune_sensor(vd, start)                 # the operator tunes the sensor before the first scan
     # the operator only gets a rough prior (+-30%), as with a new real device
     typical = {g: float(p.addition_voltage(k) / 1e3 * rng.uniform(0.7, 1.3))
                for k, g in enumerate(GATES)}
@@ -83,6 +85,45 @@ def create(ws: Workspace, seed: int | None = None, preset: str = "hrl_linear",
                                 tunnel_gates={"P1": "T1", "P3": "T2"},
                                 notes="Created by ChargeCell"))
     return vd
+
+
+def _tune_sensor(vd: dict, at: dict) -> None:
+    """Put the charge sensor on the flank of its Coulomb peak at gate voltages ``at`` (V)."""
+    vd.pop("sensor", None)
+    p = device_state(vd, at)
+    V = np.array([[at[g] * 1e3 for g in GATES]])
+    vd["sensor"] = dict(v_ref=V[0].tolist(), n_ref=classical_ground_state(p, V)[0].tolist())
+
+
+def retune_sensor(ws: Workspace, vd_id: str, at: dict | None = None) -> None:
+    """What the operator does when ChargeCell says the sensor lost sensitivity: retune it at the
+    present DC point (or at ``at``, gate -> V)."""
+    vd = ws.load_virtual_device(vd_id)
+    _tune_sensor(vd, {**vd["voltage_state"], **(at or {})})
+    ws.save_virtual_device(vd_id, vd)
+
+
+def average_longer(ws: Workspace, vd_id: str, factor: float = 4.0) -> None:
+    """Integrate ``factor`` times longer: white noise falls by sqrt(factor) (capped at 16x)."""
+    vd = ws.load_virtual_device(vd_id)
+    vd["snr_boost"] = float(min(4.0, vd.get("snr_boost", 1.0) * np.sqrt(factor)))
+    ws.save_virtual_device(vd_id, vd)
+
+
+def follow_fix(ws: Workspace, vd_id: str, analysis: dict, window: dict | None) -> None:
+    """Apply the fix an UNINTERPRETABLE verdict asks for, as an operator would: retune the
+    sensor (at the window about to be scanned) and, for noise, average longer."""
+    if analysis.get("status") != schema.UNINTERPRETABLE:
+        return
+    reason = analysis.get("reason")
+    if reason in ("sensor_insensitive", "low_snr"):
+        at = {}
+        if window:
+            at = {window["x_gate"]: (window["x"][0] + window["x"][1]) / 2,
+                  window["y_gate"]: (window["y"][0] + window["y"][1]) / 2}
+        retune_sensor(ws, vd_id, {g: v for g, v in at.items() if g in GATES})
+    if reason == "low_snr":
+        average_longer(ws, vd_id)
 
 
 def start_window(vd: dict, gates=("P1", "P2"), points: int = 90) -> tuple:
@@ -120,6 +161,9 @@ def device_state(vd: dict, vs: dict, exclude=()) -> DeviceParams:
         p.latch[d] = float(np.exp(-min(gt, 50.0)))
     p.offset = p.offset + shift
     p.v11 = p.v11 + np.linalg.solve(p.lever, shift)     # the (1,1,1) cell moves with them
+    if vd.get("sensor"):                                # where the operator last tuned the sensor
+        p.v_ref = np.asarray(vd["sensor"]["v_ref"], float)
+        p.n_ref = np.asarray(vd["sensor"]["n_ref"], float)
     return p
 
 
@@ -196,6 +240,7 @@ def measure(ws: Workspace, vd_id: str, x_gate: str, y_gate: str, x: tuple, y: tu
     rng = np.random.default_rng(seed if seed is not None else vd["measurements"] + vd["seed"])
     art = sample_artifacts(rng, "normal")
     art.snr_target = float(snr) if snr else float(rng.uniform(4.0, 25.0))
+    art.snr_target *= float(vd.get("snr_boost", 1.0))
     art.jumps = []
     sim = _simulate(vd, x_gate, y_gate, x, y, kind, vs, rng, art)
     vs[x_gate] = (x[0] + x[1]) / 2
@@ -325,6 +370,7 @@ def evaluate(ws: Workspace, kind: str = "PvP", n_devices: int = 10, max_scans: i
                 if g not in (nw["x_gate"], nw["y_gate"]) and g in vd["voltage_state"]:
                     vd["voltage_state"][g] += dv
             ws.save_virtual_device(vd["id"], vd)
+            follow_fix(ws, vd["id"], res, nw)                  # e.g. retune the sensor
             win = ((nw["x_gate"], tuple(nw["x"])), (nw["y_gate"], tuple(nw["y"])))
         results.append(dict(device=vd["id"], scans=found_at, correct=correct, trail=trail))
     found = [r for r in results if r["scans"]]

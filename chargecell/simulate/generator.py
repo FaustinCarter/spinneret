@@ -135,13 +135,21 @@ def sample_window(rng, p: DeviceParams, intent: str, pair=None, coarse: bool = F
     ca, cb = p.v11[a], p.v11[b]
     if intent == schema.FOUND:
         # keep enough of the empty region inside to count from (ANCHOR_WIDTH and a margin),
-        # then the (1,1) cell and part of its neighbours
-        ea, eb = rng.uniform(1.4, 2.2), rng.uniform(1.4, 2.2)
+        # then the (1,1) cell and part of its neighbours. A third of these windows keep a
+        # borderline empty region (either side of ANCHOR_WIDTH), where the call is hardest.
+        lo, hi = (0.7, 1.9) if rng.random() < 0.35 else (1.4, 2.2)
+        ea, eb = rng.uniform(lo, hi), rng.uniform(lo, hi)
         wx, wy = (ea + rng.uniform(1.25, 2.6)) * dva, (eb + rng.uniform(1.25, 2.6)) * dvb
         if rng.random() < 0.5:
             wy = max(wx * dvb / dva, (eb + 1.25) * dvb)
         cx = ca - 0.5 * dva - ea * dva + wx / 2 + rng.normal(0, 0.08) * dva
         cy = cb - 0.5 * dvb - eb * dvb + wy / 2 + rng.normal(0, 0.08) * dvb
+    elif rng.random() < 0.3:
+        # near the target, where guidance ends up: (1,1) in view or one electron away, with
+        # too little of the empty region to count from (the easiest place to miscount)
+        wx, wy = rng.uniform(2.2, 4.0) * dva, rng.uniform(2.2, 4.0) * dvb
+        cx = ca + rng.uniform(-1.6, 1.6) * dva
+        cy = cb + rng.uniform(-1.6, 1.6) * dvb
     else:
         wx, wy = rng.uniform(0.8, 4.5) * dva, rng.uniform(0.8, 4.5) * dvb
         cx = ca + rng.uniform(-4.0, 5.0) * dva

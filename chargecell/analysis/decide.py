@@ -79,6 +79,26 @@ def empty_region_too_narrow(na: np.ndarray, nb: np.ndarray) -> str | None:
     return None
 
 
+HIDDEN_LINE = 0.22   # mean line probability along the "empty" region that suggests a hidden line
+
+
+def hidden_line_in_empty(na: np.ndarray, nb: np.ndarray, lines_p: np.ndarray) -> str | None:
+    """The model's own line map must agree that the empty region is empty. A faint first
+    transition can be missed by the occupancy map while the line map still sees it; counting
+    from such a region gives the wrong cell. Looks along each column of the n = 0 region of dot
+    a (each row for dot b), away from its edge, for a line of that dot's family. Returns which
+    dot fails, or None."""
+    for name, empty, lines in (("dot a", na == 0, lines_p[0]),
+                               ("dot b", (nb == 0).T, lines_p[1].T)):
+        core = ndimage.binary_erosion(empty, iterations=2)
+        S = core.shape[0]
+        for i in range(core.shape[1]):
+            rows = core[:, i]
+            if rows.sum() >= 0.25 * S and float(lines[rows, i].mean()) > HIDDEN_LINE:
+                return name
+    return None
+
+
 def demoted_status(sp) -> str:
     """Where a FOUND that failed its checks goes. FOUND and NOT_IN_WINDOW both mean "readable",
     so the scan is only called uninterpretable if that is more likely than readable."""
@@ -172,6 +192,10 @@ def analyze(ws: Workspace, scan: Scan, model_id: str | None = None,
             if short:
                 checks.append(f"the empty region of {short} is narrower than an electron spacing, "
                               "so it could be an occupied cell cut off by the window edge")
+            hidden = hidden_line_in_empty(na, nb, p["lines_p"])
+            if hidden:
+                checks.append(f"the line map shows a possible faint transition inside the empty "
+                              f"region of {hidden}, so electrons may be miscounted")
         if checks:
             demoted = True
             status = demoted_status(sp)

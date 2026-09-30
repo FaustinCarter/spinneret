@@ -50,6 +50,11 @@ class TrainConfig:
     max_minutes: float = 0.0          # optional wall-clock budget per member (0 = none)
 
 
+# weight of line pixels against background: thin, rare families (and the sensor's own
+# features, which are easily mistaken for dot lines) get more
+LINE_POS_WEIGHT = {"interdot": 8.0, "spectator": 8.0, "sensor": 8.0, "tiebar": 8.0}
+
+
 def _loss(out: dict, b: dict, spec: kinds.KindSpec = kinds.PVP) -> tuple[torch.Tensor, dict]:
     w = b["weight"]
     l_cls = 0.0
@@ -58,7 +63,8 @@ def _loss(out: dict, b: dict, spec: kinds.KindSpec = kinds.PVP) -> tuple[torch.T
                               reduction="none").mean((1, 2))
         l_cls = l_cls + torch.nan_to_num(l_h)       # all pixels ignored gives nan
     lines_logit = out["lines"]
-    pos_w = torch.full((1, lines_logit.shape[1], 1, 1), 4.0, device=lines_logit.device)
+    pos_w = torch.tensor([LINE_POS_WEIGHT.get(f, 4.0) for f in spec.line_families],
+                         device=lines_logit.device).view(1, -1, 1, 1)
     l_bce = F.binary_cross_entropy_with_logits(lines_logit, b["lines"], pos_weight=pos_w,
                                                reduction="none").mean((1, 2, 3))
     p = torch.sigmoid(lines_logit)
