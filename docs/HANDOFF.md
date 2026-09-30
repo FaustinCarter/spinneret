@@ -127,6 +127,17 @@ tie-bar coupling ratio against independent tunnel-coupling measurements.
   name.
 - **Practice devices shift with T and X gates** (`virtual.device_state` also moves `v11`); the
   PvP ground truth uses the shifted device.
+- **Practice devices follow the advice** since this session: the sensor is tuned at the start
+  voltages and retuned when ChargeCell reports sensor_insensitive or low_snr (which also averages
+  longer), and advised gate changes are applied (`virtual.apply_advice`). Closed-loop numbers
+  from before this change are not comparable (the loop used to stall on sensor problems nobody
+  fixed).
+- **The automation tree records every saved analysis**, including those in tests and in
+  `chargecell navigate`/`eval_model.py` (practice runs, source `practice`). Each practice device
+  has its own device name, so each gets its own run. Batch re-analysis does not record.
+- **Label drafts from occupancy maps** keep boundaries that only clip a window corner (2+
+  points); dropping them used to shift every count in the window by one. Maps with charge jumps
+  (non-monotonic occupancy) still cannot be represented by boundary polylines.
 - Earlier items still true: the line-map lattice joins reservoir segments through interdot
   segments, rejects spacings far from the prior/history, and never shrinks a window on an
   unmeasured spacing (don't undo these together); only measured spacings are stored in

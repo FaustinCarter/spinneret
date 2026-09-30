@@ -145,8 +145,9 @@ def sample_pvt_window(rng, p: DeviceParams, q: PvTParams, intent: str, coarse: b
             dvj = p.addition_voltage(j)
             v_plungers[j] = (p.v11[j] - rng.uniform(0.8, 2.0) * dvj if rng.random() < 0.7
                              else p.v11[j] + rng.normal(0, 0.2) * dvj)
-    # tunnel-gate range, in decades of tunnel rate
-    h_dec = rng.uniform(2.0, 8.0)
+    # tunnel-gate range, in decades of tunnel rate: operators do not know the tunnel-rate scale,
+    # so windows range from a few decades to ones reaching deep into the closed and open regions
+    h_dec = float(np.exp(rng.uniform(np.log(2.0), np.log(16.0))))
     H = h_dec * q.beta10
     if intent == "tunnel_rate_too_low":
         y1 = q.T_open - rng.uniform(0.2, 2.0) * q.beta10
@@ -158,7 +159,7 @@ def sample_pvt_window(rng, p: DeviceParams, q: PvTParams, intent: str, coarse: b
         # the clean band [T_open, T_broad] covers a good part of the window
         band_lo, band_hi = q.T_open, q.T_broad
         centre = rng.uniform(band_lo + 0.15 * (band_hi - band_lo), band_hi - 0.15 * (band_hi - band_lo))
-        y0 = centre - rng.uniform(0.3, 0.7) * H
+        y0 = centre - rng.uniform(0.2, 0.8) * H
         y1 = y0 + H
     Tm = 0.5 * (y0 + y1)
     P0 = line_position(p, q, 0, Tm, v_plungers)
@@ -183,6 +184,8 @@ def sample_pvt_window(rng, p: DeviceParams, q: PvTParams, intent: str, coarse: b
     ppa = rng.uniform(1.5, 4.0) if coarse else rng.uniform(7.0, 30.0)
     nx = int(np.clip(round(wx / dva * ppa), 16 if coarse else 40, 220))
     ny = int(np.clip(round(h_dec * rng.uniform(4.0, 20.0)), 24, 160))
+    if rng.random() < 0.35:                 # many operators take square grids
+        ny = int(np.clip(nx, 24, 160))
     return PvTWindow(dot=d, x0=float(x0), x1=float(x1), y0=float(y0), y1=float(y1), nx=nx,
                      ny=ny, v_plungers=[float(v) for v in v_plungers],
                      fast_axis=str(rng.choice(["x", "y"], p=[0.7, 0.3])))
