@@ -74,6 +74,8 @@ class Analyzer:
         self.size = int(self.card["config"]["size"])
         self.found_threshold = float(self.card.get("found_threshold", 0.9))
         self.uncertainty_threshold = float(self.card.get("uncertainty_threshold", 0.2))
+        # test-time augmentation only if the thresholds above were calibrated with it
+        self.tta = bool(self.card.get("tta", False))
         self._run_lock = threading.Lock()
 
     @classmethod
@@ -95,7 +97,7 @@ class Analyzer:
         sig = canonical_signal(scan, self.size, carrier)
         x = torch.from_numpy(features(sig))[None]
         with self._run_lock, torch.no_grad():
-            r = predict_batch(self.models, x)
+            r = predict_batch(self.models, x, tta=self.tta)
         sm = r["status_members"][:, 0]                      # (M,3)
         ent = lambda p: float(-(p * torch.log(p + 1e-9)).sum())
         mean = sm.mean(0)

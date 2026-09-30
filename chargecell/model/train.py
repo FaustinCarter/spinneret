@@ -127,11 +127,44 @@ def train_member(cfg: TrainConfig, train_d: dict, val_d: dict, member: int,
     return model, history
 
 
+TTA = True    # test-time augmentation in analysis and threshold calibration (see predict_batch)
+
+
+def _forward(models: list, x: torch.Tensor) -> list[dict]:
+    return [m.eval()(x) for m in models]
+
+
+def _untranspose(o: dict, spec: kinds.KindSpec) -> dict:
+    """Map outputs for an axis-swapped input back to the original axes (PvP: dot A <-> B)."""
+    heads = [h.name for h in spec.class_heads]              # occ_a, occ_b
+    fam = list(spec.line_families)
+    order = list(range(len(fam)))
+    ia, ib = fam.index("a"), fam.index("b")
+    order[ia], order[ib] = ib, ia
+    out = dict(o)
+    out[heads[0]] = o[heads[1]].transpose(-1, -2)
+    out[heads[1]] = o[heads[0]].transpose(-1, -2)
+    out["lines"] = o["lines"][:, order].transpose(-1, -2)
+    out["ref"] = o["ref"][:, [1, 0]]
+    return out
+
+
 @torch.no_grad()
-def predict_batch(models: list, x: torch.Tensor) -> dict:
-    """Ensemble forward pass. Returns mean probabilities and per-member status probabilities."""
-    outs = [m.eval()(x) for m in models]
+def predict_batch(models: list, x: torch.Tensor, tta: bool = False) -> dict:
+    """Ensemble forward pass. Returns mean probabilities and per-member status probabilities.
+
+    With ``tta`` the input is also seen with its polarity flipped and, where swapping the axes is
+    a symmetry of the kind (PvP), with the axes swapped; each view counts as extra ensemble
+    members. Both are exact in feature space: features(-s) = -features(s), and
+    features(s.T) = [z.T, gy.T, gx.T]."""
     spec = models[0].spec
+    outs = _forward(models, x)
+    if tta:
+        outs += _forward(models, -x)
+        if spec.transpose_augment:
+            xt = torch.stack([x[:, 0].transpose(-1, -2), x[:, 2].transpose(-1, -2),
+                              x[:, 1].transpose(-1, -2)], 1)
+            outs += [_untranspose(o, spec) for o in _forward(models, xt) + _forward(models, -xt)]
     res = {
         **{h.name: torch.stack([o[h.name].softmax(1) for o in outs]).mean(0)
            for h in spec.class_heads},
@@ -144,15 +177,28 @@ def predict_batch(models: list, x: torch.Tensor) -> dict:
     return res
 
 
-def _run(models: list, data: dict, bs: int = 64) -> dict:
+def _run(models: list, data: dict, bs: int = 64, gates=None, tta: bool = False) -> dict:
+    """Ensemble predictions and metrics on a dataset. ``gates(prediction, S)`` (the analysis's
+    FOUND checks) is applied to every sample whose top status is FOUND -> ``gate_ok``. ``tta``
+    as in ``predict_batch`` (the analysis uses it, so calibration must too)."""
     spec = models[0].spec
     ds = CSDDataset(data, augment=False, kind=spec.name)
     dl = DataLoader(ds, batch_size=bs, shuffle=False)
     acc: dict[str, list] = {k: [] for k in ("status", "reason", "ref", "occ_ok", "occ_n",
-                                            "line_tp", "line_fp", "line_fn", "mi")}
+                                            "line_tp", "line_fp", "line_fn", "mi", "gate_ok")}
     head_ok = {h.name: [0.0, 0.0] for h in spec.class_heads}
     for b in dl:
-        r = predict_batch(models, b["x"])
+        r = predict_batch(models, b["x"], tta=tta)
+        if gates is not None:
+            st = r["status"].numpy()
+            ok = np.zeros(len(st), bool)
+            S = b["x"].shape[-1]
+            for i in np.nonzero(st.argmax(1) == 0)[0]:
+                pi = {"status_p": st[i], "ref_p": r["ref"][i].numpy(),
+                      "lines_p": r["lines"][i].numpy(),
+                      **{f"{h.name}_p": r[h.name][i].numpy() for h in spec.class_heads}}
+                ok[i] = not gates(pi, S)
+            acc["gate_ok"].append(ok)
         acc["status"].append(r["status"].numpy())
         acc["reason"].append(r["reason"].numpy())
         acc["ref"].append(r["ref"].numpy())
@@ -181,6 +227,7 @@ def _run(models: list, data: dict, bs: int = 64) -> dict:
         "head_acc": {k: v[0] / max(1.0, v[1]) for k, v in head_ok.items()},
         "line_tp": np.sum(acc["line_tp"], 0), "line_fp": np.sum(acc["line_fp"], 0),
         "line_fn": np.sum(acc["line_fn"], 0),
+        "gate_ok": np.concatenate(acc["gate_ok"]) if acc["gate_ok"] else None,
     }
 
 
@@ -190,24 +237,33 @@ def evaluate_quick(model, data: dict, kind: str = "PvP") -> dict:
                 val_occ_acc=round(float(r["occ_acc"]), 4))
 
 
-def calibrate_found_threshold(p_found: np.ndarray, is_found: np.ndarray, target: float) -> float:
-    """Smallest threshold whose FOUND precision on held-out data reaches the target."""
+def calibrate_found_threshold(p_found: np.ndarray, is_found: np.ndarray, target: float,
+                              eligible: np.ndarray | None = None) -> float:
+    """Smallest threshold whose FOUND precision on held-out data reaches the target. With
+    ``eligible`` (the samples that pass the analysis's other FOUND checks), precision is that of
+    the final decision: a FOUND call needs the threshold and every check."""
+    ok = np.ones(len(p_found), bool) if eligible is None else np.asarray(eligible, bool)
     for t in np.linspace(0.5, 0.995, 100):
-        pred = p_found >= t
+        pred = ok & (p_found >= t)
         if pred.sum() >= 5 and (is_found[pred]).mean() >= target:
             return float(t)
     return 0.995
 
 
 def full_metrics(models: list, data: dict, threshold: float | None, target: float) -> dict:
-    r = _run(models, data)
+    """Metrics of the final decision (threshold and the analysis's FOUND checks), with the
+    threshold calibrated on this data when ``threshold`` is None."""
+    from ..analysis.decide import found_gates
+
+    r = _run(models, data, gates=found_gates(models[0].spec.name), tta=TTA)
     y = np.asarray(data["status"]).astype(int)
     p_found = r["status"][:, 0]
+    gate_ok = r["gate_ok"]
     if threshold is None:
-        threshold = calibrate_found_threshold(p_found, y == 0, target)
+        threshold = calibrate_found_threshold(p_found, y == 0, target, gate_ok)
     # decision with abstention on FOUND
     pred = r["status"].argmax(1)
-    demote = (pred == 0) & (p_found < threshold)
+    demote = (pred == 0) & ((p_found < threshold) | ~gate_ok)
     alt = np.where(r["status"][:, 2] > 0.5, 2, 1)     # as analysis.decide.demoted_status
     pred = np.where(demote, alt, pred)
     cm = np.zeros((3, 3), int)
@@ -300,13 +356,35 @@ def train(ws: Workspace, cfg: TrainConfig, progress: Callable[[float, str, dict]
                   n_val={k: int(len(v["status"])) for k, v in val_sets.items()}),
         metrics=metrics, history=history,
         uncertainty_threshold=float(np.percentile(
-            _run(models, val_sets[calib_on])["mi"], 90)) if calib_on in val_sets else 0.2,
+            _run(models, val_sets[calib_on], tta=TTA)["mi"], 90)) if calib_on in val_sets else 0.2,
+        tta=TTA,
     )
     write_json(mdir / "model.json", card)
     if ws.active_model_id(cfg.kind) in (None, model_id) or not ws.active_file(cfg.kind).exists():
         ws.set_active_model(model_id)
     say(1.0, "done", {"model_id": model_id})
     return model_id
+
+
+def recalibrate(ws: Workspace, model_id: str, target: float | None = None) -> dict:
+    """Re-calibrate a trained model's FOUND threshold on its own validation split (synthetic),
+    for the final decision, and update its model card. Returns the new synthetic metrics."""
+    models, card = load_models(ws, model_id)
+    cfg = card["config"]
+    kind = model_kind(card)
+    syn = load_synthetic(ws, cfg["synthetic"], cfg["size"], kind)
+    idx = np.random.default_rng(cfg["seed"]).permutation(len(syn["status"]))
+    n_val = max(1, int(len(idx) * cfg["val_fraction"]))
+    val = subset(syn, idx[:n_val])
+    m = full_metrics(models, val, None, target if target is not None else cfg["target_precision"])
+    card["previous_found_threshold"] = card.get("found_threshold")
+    card["found_threshold"] = m["found_threshold"]
+    card["uncertainty_threshold"] = float(np.percentile(_run(models, val, tta=TTA)["mi"], 90))
+    card["tta"] = TTA
+    card["calibrated_on"] = "synthetic"
+    card["metrics"]["synthetic"] = m
+    write_json(ws.model_dir(model_id) / "model.json", card)
+    return m
 
 
 def model_kind(card: dict) -> str:

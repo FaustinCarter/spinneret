@@ -142,6 +142,29 @@ def counting_checks(lines: dict, good: np.ndarray, load_p: np.ndarray, S: int) -
     return out
 
 
+def pvt_found_gates(p: dict, S: int) -> list[str]:
+    """Checks a PvT FOUND call must pass besides the calibrated threshold (also used to
+    calibrate that threshold in training)."""
+    ref = bool(p["ref_p"][0] > 0.5)
+    occ = p["occ_p"].argmax(0)
+    rows = row_regimes(p["regime_p"], p["lines_p"][0])
+    lines = loading_lines(occ, rows != SLOW) if ref else []
+    by_k = {l["index"]: l for l in lines}
+    good = rows == GOOD
+    need = max(3, S // 12)
+    good_rows = lambda l: int(sum(1 for j in range(S) if good[j] and l["j_lo"] <= j <= l["j_hi"]))
+    checks = []
+    if not ref:
+        checks.append("the empty dot is not visible")
+    if 0 not in by_k or 1 not in by_k:
+        checks.append("the first two loading lines were not both traced")
+    elif good_rows(by_k[0]) < need or good_rows(by_k[1]) < need:
+        checks.append("electrons do not load cleanly over enough of the tunnel-gate range")
+    else:
+        checks += counting_checks(by_k, good, p["lines_p"][0], S)
+    return checks
+
+
 def analyze_pvt(ws: Workspace, scan: Scan, model_id: str | None = None,
                 cfg: DeviceConfig | None = None) -> dict:
     cfg = cfg or ws.get_device(scan.device)
@@ -184,14 +207,7 @@ def analyze_pvt(ws: Workspace, scan: Scan, model_id: str | None = None,
     if status == schema.FOUND:
         if sp[0] < tau:
             checks.append(f"confidence {sp[0]:.2f} is below the calibrated threshold {tau:.2f}")
-        if not ref:
-            checks.append("the empty dot is not visible")
-        if 0 not in by_k or 1 not in by_k:
-            checks.append("the first two loading lines were not both traced")
-        elif good_rows(by_k[0]) < need or good_rows(by_k[1]) < need:
-            checks.append("electrons do not load cleanly over enough of the tunnel-gate range")
-        else:
-            checks += counting_checks(by_k, good, p["lines_p"][0], S)
+        checks += pvt_found_gates(p, S)
         if checks:
             status = demoted_status(sp)
     allowed = SPEC.reasons_for(status)

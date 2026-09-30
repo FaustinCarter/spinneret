@@ -126,6 +126,22 @@ def transfer_width(scan: Scan, a: np.ndarray, b: np.ndarray, n: np.ndarray) -> d
                 pitch=pitch, offset=float(popt[3]))
 
 
+def _gate_checks(geo: dict | None) -> list[str]:
+    if geo is None:
+        return ["no (1,1)-(2,0) boundary was traced"]
+    if not (geo["low_found"] and geo["high_found"]):
+        return ["a triple point is missing or at the window edge"]
+    if geo["length"] < 3:
+        return ["the tie bar is too short to measure"]
+    return []
+
+
+def tiebar_found_gates(p: dict, S: int) -> list[str]:
+    """Checks a tie-bar FOUND call must pass besides the calibrated threshold (also used to
+    calibrate that threshold in training)."""
+    return _gate_checks(tiebar_geometry(p["region_p"].argmax(0), p["lines_p"][2]))
+
+
 def analyze_tiebar(ws: Workspace, scan: Scan, model_id: str | None = None,
                    cfg: DeviceConfig | None = None) -> dict:
     cfg = cfg or ws.get_device(scan.device)
@@ -155,12 +171,7 @@ def analyze_tiebar(ws: Workspace, scan: Scan, model_id: str | None = None,
     if status == schema.FOUND:
         if sp[0] < tau:
             checks.append(f"confidence {sp[0]:.2f} is below the calibrated threshold {tau:.2f}")
-        if geo is None:
-            checks.append("no (1,1)-(2,0) boundary was traced")
-        elif not (geo["low_found"] and geo["high_found"]):
-            checks.append("a triple point is missing or at the window edge")
-        elif geo["length"] < 3:
-            checks.append("the tie bar is too short to measure")
+        checks += _gate_checks(geo)
         if checks:
             status = demoted_status(sp)
     allowed = SPEC.reasons_for(status)

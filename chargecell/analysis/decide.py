@@ -99,6 +99,43 @@ def hidden_line_in_empty(na: np.ndarray, nb: np.ndarray, lines_p: np.ndarray) ->
     return None
 
 
+def pvp_found_gates(p: dict, S: int | None = None) -> list[str]:
+    """Checks a FOUND call must pass besides the calibrated confidence threshold, on the model's
+    prediction (occupancy, anchoring and line maps). Used at analysis time and when the
+    threshold is calibrated in training, so that it is calibrated for the final decision."""
+    ref_a, ref_b = bool(p["ref_p"][0] > 0.5), bool(p["ref_p"][1] > 0.5)
+    na, nb = p["occ_a_p"].argmax(0), p["occ_b_p"].argmax(0)
+    checks = []
+    if not (ref_a and ref_b):
+        checks.append("the empty region is not visible for both dots")
+    cell = _largest_component((na == 1) & (nb == 1)) if (ref_a and ref_b) else None
+    if cell is None or cell.sum() < 4 or cell.mean() < 0.005:
+        checks.append("no (1,1) region was segmented")
+    elif _edge_fraction(cell) > 0.4:
+        checks.append("the (1,1) region is mostly cut off by the window edge")
+    if ref_a and ref_b:
+        short = empty_region_too_narrow(na, nb)
+        if short:
+            checks.append(f"the empty region of {short} is narrower than an electron spacing, "
+                          "so it could be an occupied cell cut off by the window edge")
+        hidden = hidden_line_in_empty(na, nb, p["lines_p"])
+        if hidden:
+            checks.append(f"the line map shows a possible faint transition inside the empty "
+                          f"region of {hidden}, so electrons may be miscounted")
+    return checks
+
+
+def found_gates(kind: str):
+    """The FOUND checks (besides the threshold) of a scan kind: f(prediction, S) -> failures."""
+    if kind == "PvT":
+        from .pvt import pvt_found_gates
+        return pvt_found_gates
+    if kind == "tiebar":
+        from .tiebar import tiebar_found_gates
+        return tiebar_found_gates
+    return pvp_found_gates
+
+
 def demoted_status(sp) -> str:
     """Where a FOUND that failed its checks goes. FOUND and NOT_IN_WINDOW both mean "readable",
     so the scan is only called uninterpretable if that is more likely than readable."""
@@ -181,21 +218,7 @@ def analyze(ws: Workspace, scan: Scan, model_id: str | None = None,
     if status == schema.FOUND:
         if sp[0] < tau:
             checks.append(f"confidence {sp[0]:.2f} is below the calibrated threshold {tau:.2f}")
-        if not (ref_a and ref_b):
-            checks.append("the empty region is not visible for both dots")
-        if cell is None or cell["area_fraction"] < 0.005:
-            checks.append("no (1,1) region was segmented")
-        elif cell["edge_fraction"] > 0.4:
-            checks.append("the (1,1) region is mostly cut off by the window edge")
-        if ref_a and ref_b:
-            short = empty_region_too_narrow(na, nb)
-            if short:
-                checks.append(f"the empty region of {short} is narrower than an electron spacing, "
-                              "so it could be an occupied cell cut off by the window edge")
-            hidden = hidden_line_in_empty(na, nb, p["lines_p"])
-            if hidden:
-                checks.append(f"the line map shows a possible faint transition inside the empty "
-                              f"region of {hidden}, so electrons may be miscounted")
+        checks += pvp_found_gates(p, S)
         if checks:
             demoted = True
             status = demoted_status(sp)
