@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "chargecell"
 version = "0.1.0"
-description = "Find the (1,1) charge cell in double-quantum-dot charge stability diagrams, with operator guidance, labelling and training tools"
+description = "Read the charge-stability scans of an exchange-only qubit tune-up (PvT, PvP, tie bar), advise the next scan, and record each tune-up as a graded automation tree; with labelling, training and practice tools"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

@@ -129,3 +129,29 @@ def test_navigation_without_any_voltage_prior(ws, oracle_analyzer):
                                     limits=False)
     assert r["found"] >= 5, r
     assert r["correct"] == r["found"], "every FOUND must agree with the ground truth"
+
+
+def test_held_back_found_never_rescans_the_same_window(ws, oracle_analyzer, monkeypatch):
+    """A FOUND that is held back (here: every FOUND, by an unreachable threshold) must not make
+    the guidance propose the window it just scanned: it zooms out instead."""
+    from chargecell import runs
+
+    def same_as_scan(scan, xr, yr):                 # both ends within 10% of the span
+        sx, sy = scan.x[-1] - scan.x[0], scan.y[-1] - scan.y[0]
+        return (abs(xr[0] - scan.x[0]) < 0.1 * sx and abs(xr[1] - scan.x[-1]) < 0.1 * sx
+                and abs(yr[0] - scan.y[0]) < 0.1 * sy and abs(yr[1] - scan.y[-1]) < 0.1 * sy)
+
+    monkeypatch.setattr(oracle_analyzer, "found_threshold", 1.01)
+    r = virtual.evaluate(ws, "PvP", n_devices=4, max_scans=6, seed=2)
+    assert r["found"] == 0
+    held = 0
+    for x in r["results"]:
+        run = runs.load(ws, x["run_id"])
+        for m in (n for n in run["nodes"] if n["type"] == "measure"):
+            scan = ws.load_scan(m["data"]["scan_id"])
+            res = ws.load_analysis(scan.id)
+            nw = (res.get("recommendation") or {}).get("next_window")
+            if res["status"] == "NOT_IN_WINDOW" and nw:
+                assert not same_as_scan(scan, nw["x"][:2], nw["y"][:2]), res["recommendation"]
+                held += bool(res.get("held_back"))
+    assert held >= 2
