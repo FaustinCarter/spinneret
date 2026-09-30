@@ -7,6 +7,7 @@
     chargecell navigate   test the guidance on simulated practice devices
     chargecell schema     print the JSON Schema of the chargecell/1 request and response
     chargecell runs       list tune-up runs, print one as a graded tree, or --stats across runs
+    chargecell models     list, switch, add, export, rename or delete models
 """
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ BUNDLED_MODELS = Path(__file__).parent / "assets" / "models"
 def _install_bundled_model(ws) -> None:
     """Copy the bundled starter models (one per scan kind) into a workspace that has no model of
     that kind yet, so analysis works on day one."""
+    from . import modelstore
     if not BUNDLED_MODELS.exists():
         return
     have = {ws.model_kind(m) for m in ws.list_models()}
@@ -35,15 +37,13 @@ def _install_bundled_model(ws) -> None:
         kind = ws.model_kind(json.loads(card.read_text()))
         if kind in have:
             continue
-        if any(f.read_bytes()[:40].startswith(b"version https://git-lfs") for f in d.glob("*.pt")):
-            print(f"The bundled {kind} model {d.name} was not downloaded (Git LFS pointer "
-                  "files). Run `git lfs install && git lfs pull` in the repository and "
-                  "reinstall, or train a model on the Train page.")
+        try:
+            mid = modelstore.add(ws, d, use_it=True, source="bundled with ChargeCell")
+        except modelstore.ModelFileError as e:
+            print(f"The bundled {kind} model could not be installed: {e}")
             continue
-        shutil.copytree(d, ws.model_dir(d.name), dirs_exist_ok=True)
-        ws.set_active_model(d.name)
         have.add(kind)
-        print(f"Installed bundled starter {kind} model {d.name}")
+        print(f"Installed the bundled {kind} model {mid}")
 
 
 def cmd_serve(a) -> None:
@@ -92,8 +92,13 @@ def cmd_calibrate(a) -> None:
     from .model.train import recalibrate
     from .storage import Workspace
 
+    from . import modelstore
     ws = Workspace(a.workspace)
-    m = recalibrate(ws, a.model, a.target, a.held_out or None)
+    try:
+        mid = modelstore.find(ws, a.model)["id"]
+    except KeyError as e:
+        raise SystemExit(str(e).strip("'\""))
+    m = recalibrate(ws, mid, a.target, a.held_out or None)
     Analyzer._cache.clear()
     print(json.dumps({k: m[k] for k in ("n", "found_threshold", "found_precision", "found_recall",
                                          "status_accuracy", "confusion")}, indent=1))
@@ -162,6 +167,54 @@ def cmd_navigate(a) -> None:
     print(json.dumps({k: v for k, v in r.items() if k != "results"}, indent=1))
 
 
+def cmd_models(a) -> None:
+    from . import kinds, modelstore
+    from .storage import Workspace
+
+    ws = Workspace(a.workspace)
+    try:
+        if a.action == "list":
+            cards = ws.list_models()
+            active = set(ws.active_models().values())
+            for kind in kinds.KINDS.values():
+                mine = [c for c in cards if ws.model_kind(c) == kind.name]
+                print(f"{kind.short} scans ({kind.name}):")
+                if not mine:
+                    print("  no model yet")
+                for c in mine:
+                    q = modelstore.quality(c)
+                    score = (f"right {round(100 * q['precision'])}% of the time it says found"
+                             if q.get("precision") is not None else "no test results")
+                    print(f"  {'* in use' if c['id'] in active else '        '}  "
+                          f"{modelstore.display_name(c):40s} {c['id']}  ({score})")
+            print("\nSwitch with `chargecell models use <name or id>`.")
+        elif a.action == "use":
+            card = modelstore.use(ws, modelstore.find(ws, a.target)["id"])
+            print(f"Now using {modelstore.display_name(card)} for "
+                  f"{kinds.get(ws.model_kind(card)).short} scans.")
+        elif a.action == "add":
+            mid = modelstore.add(ws, a.target, use_it=a.use, name=a.name)
+            card = modelstore.find(ws, mid)
+            state = "in use" if mid in ws.active_models().values() else "not in use"
+            print(f"Added {modelstore.display_name(card)} ({mid}), {state}.")
+        elif a.action == "export":
+            card = modelstore.find(ws, a.target)
+            path = modelstore.export(ws, card["id"], a.out)
+            print(f"Wrote {path}. Add it on another computer with `chargecell models add {path.name}`"
+                  " or on the Models page.")
+        elif a.action == "rename":
+            if not a.name:
+                raise SystemExit("Give the new name with --name.")
+            card = modelstore.rename(ws, modelstore.find(ws, a.target)["id"], a.name)
+            print(f"Renamed {card['id']} to {card['name']}.")
+        elif a.action == "delete":
+            card = modelstore.find(ws, a.target)
+            modelstore.delete(ws, card["id"])
+            print(f"Deleted {modelstore.display_name(card)}.")
+    except (KeyError, modelstore.ModelFileError) as e:
+        raise SystemExit(str(e).strip("'\""))
+
+
 def cmd_runs(a) -> None:
     from . import runs
     from .storage import Workspace
@@ -225,8 +278,26 @@ def main(argv=None) -> None:
     s.add_argument("--activate", action="store_true")
     s.set_defaults(fn=cmd_train)
 
+    s = sub.add_parser("models", help="list, switch, add, export, rename or delete models",
+                       description="Models: one is in use per scan kind.\n\n"
+                       "  chargecell models                      list models, * marks the one in use\n"
+                       "  chargecell models use NAME             use this model for its scan kind\n"
+                       "  chargecell models add FILE [--use]     add a model file (.zip) or folder\n"
+                       "  chargecell models export NAME [--out PATH]  write a model file (.zip)\n"
+                       "  chargecell models rename NAME --name NEW\n"
+                       "  chargecell models delete NAME          (not the one in use)\n\n"
+                       "NAME is the model's name or id, or the end of its id.",
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
+    s.add_argument("action", nargs="?", default="list",
+                   choices=["list", "use", "add", "export", "rename", "delete"])
+    s.add_argument("target", nargs="?", help="model name or id; for add: a model file or folder")
+    s.add_argument("--use", action="store_true", help="add: also put the model in use")
+    s.add_argument("--name", default=None, help="add, rename: the model's name")
+    s.add_argument("--out", default=None, help="export: file or folder to write to")
+    s.set_defaults(fn=cmd_models)
+
     s = sub.add_parser("calibrate", help="recalibrate a model's FOUND threshold")
-    s.add_argument("--model", required=True, help="model id in the workspace")
+    s.add_argument("--model", required=True, help="model name or id in the workspace")
     s.add_argument("--target", type=float, default=None,
                    help="FOUND precision to reach (default: the model's training target)")
     s.add_argument("--held-out", nargs="*", default=[],

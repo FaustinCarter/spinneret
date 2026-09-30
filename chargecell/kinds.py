@@ -39,6 +39,10 @@ class KindSpec:
     class_heads: tuple[ClassHead, ...]
     n_ref: int
     transpose_augment: bool          # is swapping the axes a symmetry of this kind?
+    # plain-language names for the GUI, the CLI and messages
+    short: str = ""                  # e.g. "Plunger vs plunger"
+    goal: str = ""                   # what a scan of this kind is for
+    goal_noun: str = ""              # what "found" refers to
 
     @property
     def n_dense(self) -> int:
@@ -54,7 +58,8 @@ _COMMON_TEXT = {k: schema.REASON_TEXT[k] for k in (
     "charge_instability", "resolution_too_coarse")}
 
 PVP = KindSpec(
-    name="PvP", title="Plunger vs plunger",
+    name="PvP", title="Plunger vs plunger", short="Plunger vs plunger",
+    goal="find the (1,1) cell of a dot pair", goal_noun="(1,1) cell",
     reasons=tuple(schema.REASONS),
     not_in_window=tuple(schema.NOT_IN_WINDOW_REASONS),
     uninterpretable=tuple(schema.UNINTERPRETABLE_REASONS),
@@ -80,7 +85,8 @@ PVT_REASONS = (
     "resolution_too_coarse",
 )
 PVT = KindSpec(
-    name="PvT", title="Plunger vs tunnel gate",
+    name="PvT", title="Plunger vs tunnel gate", short="Plunger vs tunnel gate",
+    goal="load exactly one electron at a good tunnel rate", goal_noun="one-electron point",
     reasons=PVT_REASONS, not_in_window=PVT_REASONS[1:6], uninterpretable=PVT_REASONS[6:],
     reason_text={
         **_COMMON_TEXT,
@@ -118,7 +124,8 @@ TIEBAR_REASONS = (
     "resolution_too_coarse",
 )
 TIEBAR = KindSpec(
-    name="tiebar", title="Tie bar ((1,1)-(2,0) zoom)",
+    name="tiebar", title="Tie bar ((1,1)-(2,0) zoom)", short="Tie bar",
+    goal="find the tie bar and its two triple points for readout", goal_noun="tie bar",
     reasons=TIEBAR_REASONS, not_in_window=TIEBAR_REASONS[1:3],
     uninterpretable=TIEBAR_REASONS[3:],
     reason_text={

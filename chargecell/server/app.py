@@ -15,14 +15,14 @@ from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-from .. import kinds, labels, protocol, runs, schema, virtual
+from .. import kinds, labels, modelstore, protocol, runs, schema, virtual
 from ..analysis.decide import analyze, prediction_for_annotation
 from ..config import DeviceConfig
 from ..importers.generic import load_any
 from ..jobs import JobManager
 from ..model.dataset import plunger_on_x
 from ..model.infer import Analyzer
-from ..storage import Workspace
+from ..storage import Workspace, read_json
 
 STATIC = Path(__file__).parent / "static"
 
@@ -261,8 +261,16 @@ def create_app(workspace: str | Path) -> FastAPI:
         return JSONResponse(body, headers=headers)
 
     @app.post("/api/analyze_all")
-    def analyze_all(only_new: bool = True):
-        ids = [sid for sid in ws.scan_ids() if not (only_new and ws.load_analysis(sid))]
+    def analyze_all(only_new: bool = True, kind: Optional[str] = None):
+        """Analyse stored scans in the background: only those not analysed yet, or (after
+        switching models) all scans of one kind. Scans of a kind without a model are skipped."""
+        have = set(ws.active_models())
+        ids = []
+        for sid in ws.scan_ids():
+            k = ws.scan_summary(sid).get("kind") or "PvP"
+            if (kind and k != kind) or k not in have or (only_new and ws.load_analysis(sid)):
+                continue
+            ids.append(sid)
 
         def fn(progress):
             n = 0
@@ -332,20 +340,84 @@ def create_app(workspace: str | Path) -> FastAPI:
         shutil.rmtree(ws.synthetic_dir(name), ignore_errors=True)
         return {"deleted": name}
 
-    # ------------------------------------------------------------------ training + models
+    # ------------------------------------------------------------------ models
     @app.get("/api/models")
     def models():
         active = set(ws.active_models().values())
-        return _clean([dict(m, kind=ws.model_kind(m), active=(m["id"] in active))
-                       for m in ws.list_models()])
+        return _clean([modelstore.summary(ws, m, active) for m in ws.list_models()])
 
     @app.post("/api/models/{model_id}/activate")
     def activate(model_id: str):
         try:
-            ws.set_active_model(model_id)
+            card = modelstore.use(ws, model_id)
         except KeyError:
-            raise HTTPException(404, "unknown model")
-        return {"active": model_id}
+            raise HTTPException(404, "No model with this id.")
+        except modelstore.ModelFileError as e:
+            raise HTTPException(400, str(e))
+        Analyzer._cache.clear()
+        kind = ws.model_kind(card)
+        sums = [ws.scan_summary(sid) for sid in ws.scan_ids()]
+        n = sum(1 for x in sums if (x.get("kind") or "PvP") == kind and x.get("analysis")
+                and x["analysis"].get("model_id") != model_id)
+        return {"active": model_id, "kind": kind, "name": modelstore.display_name(card),
+                "scans_from_other_models": n}
+
+    @app.patch("/api/models/{model_id}")
+    def edit_model(model_id: str, body: dict = Body(...)):
+        try:
+            card = modelstore.rename(ws, model_id, body.get("name"), body.get("notes"))
+        except KeyError:
+            raise HTTPException(404, "No model with this id.")
+        return _clean(modelstore.summary(ws, card))
+
+    @app.delete("/api/models/{model_id}")
+    def delete_model(model_id: str):
+        try:
+            modelstore.delete(ws, model_id)
+        except KeyError:
+            raise HTTPException(404, "No model with this id.")
+        except modelstore.ModelFileError as e:
+            raise HTTPException(409, str(e))
+        Analyzer._cache.clear()
+        return {"deleted": model_id}
+
+    @app.get("/api/models/{model_id}/download")
+    def download_model(model_id: str):
+        card = read_json(ws.model_dir(model_id) / "model.json")
+        if not card:
+            raise HTTPException(404, "No model with this id.")
+        out = ws.root / "tmp" / "exports"
+        out.mkdir(parents=True, exist_ok=True)
+        try:
+            path = modelstore.export(ws, model_id, out / modelstore.file_name(card))
+        except modelstore.ModelFileError as e:
+            raise HTTPException(400, str(e))
+        return FileResponse(path, media_type="application/zip", filename=path.name)
+
+    @app.post("/api/models/add")
+    async def add_model(files: list[UploadFile] = File(...), use: bool = Form(False),
+                        name: str = Form("")):
+        """A model file (.zip), or the files of a model folder (model.json + member_*.pt)."""
+        tmp = ws.root / "tmp" / schema.new_id("upload")
+        tmp.mkdir(parents=True)
+        try:
+            for f in files:
+                fname = Path(f.filename or "upload").name     # never a path from the client
+                with open(tmp / fname, "wb") as out:
+                    shutil.copyfileobj(f.file, out)
+            zips = list(tmp.glob("*.zip"))
+            src = zips[0] if len(zips) == 1 and len(files) == 1 else tmp
+            mid = modelstore.add(ws, src, use_it=use, name=name or None,
+                                 source=", ".join(Path(f.filename or "").name for f in files)[:200])
+        except modelstore.ModelFileError as e:
+            raise HTTPException(400, str(e))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        Analyzer._cache.clear()
+        card = read_json(ws.model_dir(mid) / "model.json")
+        return _clean(modelstore.summary(ws, card))
+
+    # ------------------------------------------------------------------ training
 
     @app.post("/api/train")
     def start_training(body: dict = Body(...)):
