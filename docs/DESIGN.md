@@ -176,7 +176,10 @@ Everything is computed in the model's index grid and converted to volts at the e
   rescan of the same window with 4x longer averaging (`kind` `confirm`; protocol purpose
   `confirm` with `averaging` 4), unless the same window was already scanned without success in
   the last three scans of the pair. Then the rules below apply. The same holds for PvT and tie
-  bar.
+  bar, where a hold-back that survives the confirmation leads to a 1.5x wider window around the
+  same centre: every check passed, so the not-in-window reason the network picks is no evidence
+  and must not steer the move (in the closed loop it used to close the tunnel gate on windows
+  that held one electron).
 - **No circles.** A window that was already scanned without success is not proposed again: the
   next scan covers both it and the present window. If that is the present window itself (the
   guidance would rescan what it just saw, typically after a FOUND was held back), the next
