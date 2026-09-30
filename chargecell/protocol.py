@@ -284,6 +284,10 @@ class ScanStep(_Strict):
     averaging: Optional[float] = Field(
         None, description="purpose confirm: integrate this many times longer per point than the "
                           "scan just sent (same window)")
+    retune_sensor: bool = Field(
+        False, description="retune the charge sensor to the steepest flank of its Coulomb peak "
+                           "at the centre of the window before scanning (after a move of more "
+                           "than one electron spacing, and before a confirmation scan)")
 
 
 class RunRef(_Strict):
@@ -340,7 +344,8 @@ def response_from_analysis(analysis: dict, cfg: DeviceConfig,
             gate_changes={g: d for g, d in move.items() if g not in swept},
             physical_moves=rec.get("physical_moves") if purpose == "locate" else None,
             max_step=cfg.max_step, confidence=confidence, basis=rec.get("basis", ""),
-            averaging=rec.get("averaging") if purpose == "confirm" else None)
+            averaging=rec.get("averaging") if purpose == "confirm" else None,
+            retune_sensor=bool(rec.get("retune_sensor")) and purpose in ("locate", "confirm"))
 
     if status == schema.FOUND and analysis.get("kind", "PvP") != "PvP":
         outcome = "found"

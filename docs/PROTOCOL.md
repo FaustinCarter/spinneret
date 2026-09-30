@@ -177,6 +177,7 @@ Clients should ignore feature types and properties they do not know.
 | `max_step` | Largest DC step the device allows (V), from the device settings. Ramp in steps no larger than this. `null`: no limit is set; moves were then limited to one window width. |
 | `confidence`, `basis` | How the step was computed (`high`: from anchored transitions in this scan). |
 | `averaging` | `confirm` only: integrate this many times longer per point than the scan just sent (4: noise halves). Otherwise `null`. |
+| `retune_sensor` | `true`: retune the charge sensor to the steepest flank of its Coulomb peak at the centre of `window` before scanning. Set after a move of more than one electron spacing (the electron numbers change, which shifts the sensor) and before a confirmation scan. |
 
 ## Submitting training data
 

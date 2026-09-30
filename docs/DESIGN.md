@@ -166,6 +166,11 @@ Everything is computed in the model's index grid and converted to volts at the e
   view and is 1.5x wider, rather than guessing a voltage. Target windows are about 3.4 cells,
   shifted toward the empty region so that more than a full cell of it is in view, and are never
   shrunk on an unmeasured spacing. Points are set to about 12 per addition voltage.
+- **Retune after large moves.** A move of more than one electron spacing (or 30% of the window
+  without a known spacing) changes the electron numbers, which shifts the charge sensor along its
+  Coulomb peak; the far dot's lines fade first, and a missed faint first line shifts every
+  count. Such moves ask for a sensor retune at the new window centre (`retune_sensor`, also
+  in the protocol), as HRL's tune-up retunes its sensor dot between steps.
 - **Confirm once.** A FOUND held back only by the confidence threshold (every geometric check
   passed) is most often the right window scanned a little too noisily. The guidance asks for one
   rescan of the same window with 4x longer averaging (`kind` `confirm`; protocol purpose

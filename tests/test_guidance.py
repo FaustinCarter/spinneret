@@ -195,3 +195,32 @@ def test_held_back_found_is_confirmed_once_then_widened(ws, oracle_analyzer, mon
                     moved_on += after_confirm
             after_confirm = rec.get("kind") == "confirm"
     assert confirms >= 2 and moved_on >= 1, (confirms, moved_on)
+
+
+def test_large_moves_ask_for_a_sensor_retune(ws, oracle_analyzer):
+    """After a move of more than one electron spacing the electron numbers have changed and the
+    sensor has shifted along its peak: the guidance asks for a retune at the new centre, the
+    protocol says so, and practice devices do it."""
+    from chargecell import protocol, runs
+    r = virtual.evaluate(ws, "PvP", n_devices=4, max_scans=6, seed=2)
+    asked = retuned = 0
+    for x in r["results"]:
+        run = runs.load(ws, x["run_id"])
+        retuned += sum(1 for n in run["nodes"] if n["type"] == "action" and
+                       n["data"]["text"].startswith("Retuned the sensor at the centre of the next"))
+        for m in (n for n in run["nodes"] if n["type"] == "measure"):
+            res = ws.load_analysis(m["data"]["scan_id"])
+            rec = res.get("recommendation") or {}
+            if rec.get("kind") not in ("move", "explore"):
+                continue
+            scan = ws.load_scan(res["scan_id"])
+            spans = {scan.x_gate: scan.x[-1] - scan.x[0], scan.y_gate: scan.y[-1] - scan.y[0]}
+            big = any(abs(d) > (rec["spacing_v"][g] or 0.3 * spans[g])
+                      for g, d in rec["move"].items())
+            assert bool(rec.get("retune_sensor")) == big, rec
+            if big:
+                resp = protocol.response_from_analysis(res, ws.get_device(scan.device))
+                assert (resp.next_scan or resp.suggestion).retune_sensor
+                assert any("retune the sensor" in s for s in rec["steps"])
+                asked += 1
+    assert asked >= 2 and retuned >= asked - len(r["results"]), (asked, retuned)

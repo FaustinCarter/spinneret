@@ -98,6 +98,10 @@ conclusive, it suggests a wider window. The same applies to PvT and tie-bar scan
 - Moves are never larger than the device's step limit and never leave its safe limits (set on the
   Device page). If a move is bigger, ChargeCell tells you to take the first step, rescan, and
   analyse again.
+- **Retune the sensor when asked.** After a move of more than about one electron, the steps say
+  "Before this scan, retune the sensor ...": park the sensor gate on the steepest flank of its
+  Coulomb peak at the centre of the new window. The dot farther from the sensor gives the
+  weakest lines, and a missed faint line makes every electron count wrong.
 - If you moved other gates since the last "found" scan, targets taken from device history may be off.
 
 ## Runs: the record of a tune-up

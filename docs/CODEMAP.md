@@ -285,7 +285,7 @@ suggestion equal to the present window (`same_as_scan`) is replaced by a 1.5x wi
 (`widened`), also in `widen_if_revisited` for PvT and tie bar. `confirm_rescan` (all kinds):
 for `held_back_by == "confidence"`, one rescan of the same window with `CONFIRM_AVERAGING` = 4
 (`kind` `confirm`, `averaging`), unless `revisited_window(..., recent=3)` finds it scanned
-already. Without a known spacing, new
+already. Moves larger than one spacing (else 30% of the window) set `retune_sensor`. Without a known spacing, new
 windows keep the present point pitch.
 
 ### importers
@@ -338,8 +338,8 @@ the closed loop per kind (`evaluate_navigation` = PvP), records each device's lo
 `_found_is_right`, `pvt_found_is_right`, `tiebar_found_is_right`). Start windows are three
 typical spacings (`start_window`); tie-bar runs start near the true tie bar (`_tiebar_start`).
 The simulated operator follows the advice (`apply_advice`: gate changes such as an exchange gate,
-a sensor retune and longer averaging for a `confirm` step, a sensor retune before a tie-bar
-zoom, then `follow_fix`: retune the sensor at the next window's centre for
+a sensor retune when the advice sets `retune_sensor` (large moves, `confirm` steps) or before a
+tie-bar zoom, longer averaging for a `confirm` step, then `follow_fix`: retune the sensor at the next window's centre for
 sensor_insensitive/low_snr, average 4x longer for low_snr via `snr_boost`). The sensor is tuned
 at the starting voltages (`_tune_sensor`, stored in `vd["sensor"]` and applied by
 `device_state`), and couples to the far one of P1/P2 at 0.35-0.65 of the near one (a readout

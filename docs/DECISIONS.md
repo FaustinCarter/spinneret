@@ -177,3 +177,12 @@ Each entry: the decision, why, and what would change it. Newest last.
     checks and the precision target are unchanged: only the labels became right. (A first
     calibration on scans rendered from the training seeds gave 0.5: the network had seen those
     images, so a calibration set must never share seeds with the training data.)
+
+32. **Retune the sensor after large moves.** In the closed loop with the model retrained on
+    corrected labels, the wrong calls near the 0.995 threshold were almost all miscounts of the
+    far dot by one: its lines were faint because the practice sensor, tuned at the starting
+    voltages, had drifted along its peak as the loop moved several electron spacings. Training
+    FOUND windows always had a well-tuned sensor. The guidance now asks for a retune at the new
+    window centre after any move of more than one electron spacing (`retune_sensor` in the
+    recommendation and the protocol), practice devices do it, and the operator guide says so.
+    This is what an expert does, and HRL's tune-up retunes its sensor dot between steps.

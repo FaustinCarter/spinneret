@@ -139,10 +139,10 @@ def follow_fix(ws: Workspace, vd_id: str, analysis: dict, window: dict | None) -
 def apply_advice(ws: Workspace, vd_id: str, analysis: dict, window: dict,
                  zoom: bool = False) -> list[tuple]:
     """Do what the advice says before the next scan, as an operator would: change the gates it
-    asks for (e.g. an exchange gate), apply the fix for an unreadable scan, retune and average
-    longer for a confirmation scan, and, before a tie-bar zoom (``zoom``), retune the sensor at
-    the zoom window. Returns the actions as
-    (text, gate_changes) for the automation tree."""
+    asks for (e.g. an exchange gate), retune the sensor at the next window's centre when asked
+    (``retune_sensor``: after a large move, and before a confirmation scan) or before a tie-bar
+    zoom (``zoom``), average longer for a confirmation scan, and apply the fix for an unreadable
+    scan. Returns the actions as (text, gate_changes) for the automation tree."""
     rec = analysis.get("recommendation") or {}
     vd = ws.load_virtual_device(vd_id)
     changes = {}
@@ -152,15 +152,14 @@ def apply_advice(ws: Workspace, vd_id: str, analysis: dict, window: dict,
             changes[g] = float(d)
     ws.save_virtual_device(vd_id, vd)
     actions = [("Set the gates as advised", changes)] if changes else []
+    if zoom or rec.get("retune_sensor"):
+        retune_sensor(ws, vd_id, _centre(window))
+        actions.append(("Retuned the sensor at the centre of the "
+                        + ("tie-bar window" if zoom else "next window"), {}))
     if rec.get("kind") == "confirm":             # one rescan of the same window, cleaner
         f = float(rec.get("averaging") or 4.0)
-        retune_sensor(ws, vd_id, _centre(window))
         average_longer(ws, vd_id, f)
-        actions += [("Retuned the sensor at the centre of the window", {}),
-                    (f"Averaged {f:g}x longer to confirm", {})]
-    if zoom:
-        retune_sensor(ws, vd_id, _centre(window))
-        actions.append(("Retuned the sensor at the centre of the tie-bar window", {}))
+        actions.append((f"Averaged {f:g}x longer to confirm", {}))
     return actions + [(text, {}) for text in follow_fix(ws, vd_id, analysis, window)]
 
 

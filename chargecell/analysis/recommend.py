@@ -558,6 +558,15 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
                                "medium": f"reachable if you {action}.",
                                "low": f"Explore: {action}."}[confidence]))
     sx, sy = x_rng[1] - x_rng[0], y_rng[1] - y_rng[0]
+    # a move of more than one electron spacing changes the electron numbers, which shifts the
+    # sensor along its Coulomb peak: the far dot's lines fade first, and a missed faint line
+    # shifts every count. Retune at the new centre (HRL's tune-up retunes the sensor dot often).
+    if abs(mx) > (sa_v or 0.3 * abs(float(scan.x[-1] - scan.x[0]))) or \
+            abs(my) > (sb_v or 0.3 * abs(float(scan.y[-1] - scan.y[0]))):
+        rec["retune_sensor"] = True
+        steps.append(f"Before this scan, retune the sensor ({cfg.sensor_gate}) to the steepest "
+                     "flank of its Coulomb peak at the centre of the new window: the move changes "
+                     "the electron numbers, which shifts the sensor.")
     steps.append(f"Next scan: {xg} {fmt_v(x_rng[0], sx)} to {fmt_v(x_rng[1], sx)} ({nx} points), "
                  f"{yg} {fmt_v(y_rng[0], sy)} to {fmt_v(y_rng[1], sy)} ({ny} points).")
     if notes:
@@ -660,7 +669,8 @@ def confirm_rescan(scan: Scan, cfg: DeviceConfig, history, rec: dict, seen: str,
     nx, ny = scan.signal.shape[1], scan.signal.shape[0]
     f = CONFIRM_AVERAGING
     rec.update(kind="confirm", confidence="medium", target=target, move={xg: 0.0, yg: 0.0},
-               averaging=f, basis="every check passed except the confidence threshold",
+               averaging=f, retune_sensor=True,
+               basis="every check passed except the confidence threshold",
                next_window={"x_gate": xg, "y_gate": yg, "x": [*x_rng, nx], "y": [*y_rng, ny]})
     rec["headline"] = (f"{seen} to be in this window, but the model is not sure enough to call "
                        f"it found. Rescan the same window with {f:g}x longer averaging to "
