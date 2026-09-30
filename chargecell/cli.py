@@ -26,6 +26,11 @@ def _install_bundled_model(ws) -> None:
     if ws.list_models() or not BUNDLED_MODELS.exists():
         return
     for d in BUNDLED_MODELS.iterdir():
+        if any(f.read_bytes()[:40].startswith(b"version https://git-lfs") for f in d.glob("*.pt")):
+            print(f"The bundled model {d.name} was not downloaded (Git LFS pointer files). "
+                  "Run `git lfs install && git lfs pull` in the repository and reinstall, or "
+                  "train a model on the Train page.")
+            continue
         if (d / "model.json").exists():
             shutil.copytree(d, ws.model_dir(d.name), dirs_exist_ok=True)
             ws.set_active_model(d.name)
