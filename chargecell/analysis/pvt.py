@@ -361,7 +361,14 @@ def recommend_pvt(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: str,
     di = dj = 0.0
     wf_x = wf_y = 1.0
     confidence, basis = "medium", ""
-    if reason in ("tunnel_rate_too_low", "reservoir_too_open") and good_band is not None \
+    if held_back_by == "confidence":
+        # confirmed once already and every check still passed except the confidence: the reason
+        # head's pick is no evidence, so do not walk away from the goal; show more around it
+        wf_x = wf_y = 1.5
+        basis = ("every check passed except the confidence, also after a confirmation scan: a "
+                 "1.5x wider window around the same centre shows more of the empty dot and of "
+                 f"the {yg} range")
+    elif reason in ("tunnel_rate_too_low", "reservoir_too_open") and good_band is not None \
             and good_band[1] - good_band[0] >= 2:
         # a clean band is in view: centre the tunnel gate on it
         dj = 0.5 * (good_band[0] + good_band[1]) - c0
@@ -413,6 +420,10 @@ def recommend_pvt(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: str,
                        "no_reference": "The empty dot is not in view. ",
                        "occupancy_too_low": "Only the first electron is in view. ",
                        }.get(reason, "No loading lines in view. ") + f"Next: {action}."
+    if held_back_by == "confidence":
+        rec["headline"] = ("The empty dot and its first loading lines appear to be in view, but the "
+                           "model is still not sure enough. Next: a 1.5x wider window around the "
+                           "same centre.")
     steps.append(window_step(scan, win["x"], win["y"], nx, ny))
     steps.append(f"Why: {basis}.")
     return rec

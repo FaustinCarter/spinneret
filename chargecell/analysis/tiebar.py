@@ -407,6 +407,10 @@ def recommend_tiebar(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: s
     rec["headline"] = ({"partially_visible": "The tie bar runs off the window. ",
                         "no_tiebar": "The (1,1)-(2,0) transition is not in this window. "}
                        .get(reason, "") + f"Next: {describe_move(win['move'], scan)}.")
+    if held_back_by == "confidence":          # confirmed once already; both triple points seen
+        rec["headline"] = ("The tie bar appears to be in view, but the model is still not sure "
+                           f"enough. Next: {describe_move(win['move'], scan)}, with a 1.5x wider "
+                           "window around it.")
     steps.append(window_step(scan, win["x"], win["y"], nx, ny))
     steps.append(f"Why: {basis}.")
     if reason == "no_tiebar" and confidence == "low":

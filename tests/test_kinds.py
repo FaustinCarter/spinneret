@@ -120,7 +120,15 @@ def test_pvt_confirmed_once_with_the_tunnel_gate_on_x(ws, oracle_analyzer, monke
     w = rec["next_window"]                  # in the analysis's order: plunger on x
     again = virtual.measure(ws, vd["id"], "T1", "P1", tuple(w["y"]), tuple(w["x"]))
     b = analyze(ws, again)
-    assert b["recommendation"]["kind"] != "confirm", b["recommendation"]
+    rb = b["recommendation"]
+    assert rb["kind"] != "confirm", rb
+    # still held back by confidence alone: zoom out around the same centre instead of following
+    # the reason head away from a window where every check passed
+    assert b["held_back_by"] == "confidence"
+    nw = rb["next_window"]
+    cx, cy = np.mean(w["x"][:2]), np.mean(w["y"][:2])
+    assert nw["x"][0] < cx < nw["x"][1] and nw["y"][0] < cy < nw["y"][1], rb
+    assert nw["x"][1] - nw["x"][0] > 1.3 * (w["x"][1] - w["x"][0]), rb
 
 
 def test_training_other_kinds(ws):
