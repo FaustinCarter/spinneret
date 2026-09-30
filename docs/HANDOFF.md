@@ -144,8 +144,17 @@ tie-bar coupling ratio against independent tunnel-coupling measurements.
 ## 5. Known issues and sharp edges
 
 - **One heavy job at a time.** On 4 cores, running data generation or the test suite during
-  training slowed epochs from ~90 s to ~13 min (load average 10). Train in the background and do
-  light work meanwhile.
+  training slowed epochs from ~90 s to ~13 min (load average 10); even a single-worker
+  generation of 1250 tie-bar scans made one PvP epoch take 17.6 min instead of 2.4. Train in
+  the background and do light work meanwhile.
+- **Calibration data must be held out by seed.** Synthetic datasets are deterministic in their
+  seed: a "new" set generated with a training seed re-renders the training images (with the
+  labels of the current code), and a threshold calibrated on it is too low (DECISIONS 31).
+  `recalibrate(ws, model_id, held_out=[...])` takes held-out sets explicitly.
+- **Thresholds and practice loops.** The synthetic calibration mix has far fewer near-miss
+  windows than a closed loop visits (the guidance steers toward (1,1), so most scans in a loop
+  are close calls). A threshold that gives precision 0.97 on the mix can still give a wrong
+  FOUND in a loop of 30 devices; check the closed loop before trusting a calibration.
 - **Oracle tests re-render without noise**, so the oracle can call FOUND on a scan whose noisy
   truth is low_snr; correctness is judged geometrically per kind (`virtual.*_is_right`).
 - **Tie-bar triple points** are located on a fine ground-state map: the spectator can change

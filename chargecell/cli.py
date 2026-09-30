@@ -87,6 +87,18 @@ def cmd_train(a) -> None:
     print(json.dumps({"model": mid, "metrics": card["metrics"]}, indent=1))
 
 
+def cmd_calibrate(a) -> None:
+    from .model.infer import Analyzer
+    from .model.train import recalibrate
+    from .storage import Workspace
+
+    ws = Workspace(a.workspace)
+    m = recalibrate(ws, a.model, a.target, a.held_out or None)
+    Analyzer._cache.clear()
+    print(json.dumps({k: m[k] for k in ("n", "found_threshold", "found_precision", "found_recall",
+                                         "status_accuracy", "confusion")}, indent=1))
+
+
 def cmd_analyze(a) -> None:
     from . import protocol
     from .analysis.decide import analyze
@@ -212,6 +224,15 @@ def main(argv=None) -> None:
     s.add_argument("--notes", default="")
     s.add_argument("--activate", action="store_true")
     s.set_defaults(fn=cmd_train)
+
+    s = sub.add_parser("calibrate", help="recalibrate a model's FOUND threshold")
+    s.add_argument("--model", required=True, help="model id in the workspace")
+    s.add_argument("--target", type=float, default=None,
+                   help="FOUND precision to reach (default: the model's training target)")
+    s.add_argument("--held-out", nargs="*", default=[],
+                   help="synthetic datasets never used in training (default: the model's own "
+                        "validation split)")
+    s.set_defaults(fn=cmd_calibrate)
 
     s = sub.add_parser("analyze", help="analyse scan files")
     s.add_argument("files", nargs="+")

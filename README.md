@@ -103,6 +103,7 @@ tunnel gates, and measurement artefacts.
 chargecell serve                                                # GUI
 chargecell simulate --name sim1 -n 3000 --size 96               # synthetic dataset (--kind PvT|tiebar)
 chargecell train --synthetic sim1 --activate                    # train and activate (--kind ...)
+chargecell calibrate --model <id> --target 0.99 --held-out sim2 # recalibrate the FOUND threshold
 chargecell analyze scan.csv --x-gate P1 --y-gate P2             # print outcome and next steps
 chargecell analyze request.json --json                          # chargecell/1 request -> response
 chargecell schema                                               # JSON Schema of the protocol

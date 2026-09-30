@@ -431,8 +431,9 @@ numerals.
   1 epoch).
 - `test_kinds.py`: PvT and tie-bar simulators and labels, coupling truth grows with t_c, the
   fitted interdot width matches the physics, oracle closed loops for PvT (no priors or limits)
-  and tie bar, PvT axes either way round, tiny training runs per kind (per-kind active model),
-  and protocol responses with the new feature types.
+  and tie bar, PvT axes either way round, tiny training runs per kind (per-kind active model)
+  and `chargecell calibrate` on a held-out set, and protocol responses with the new feature
+  types.
 - `test_labels_kinds.py`: PvT and tie-bar label round trips against simulator truth, the HTTP
   labelling workflow for both kinds (queue, defaults, per-kind reasons, drafts, training arrays),
   protocol labels (clean_T in mV, tie-bar default counts, reasons of another kind rejected).

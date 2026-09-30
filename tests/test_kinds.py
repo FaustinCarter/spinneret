@@ -128,6 +128,15 @@ def test_training_other_kinds(ws):
         scan = virtual.measure(ws, vd["id"], gates[0], gates[1], *win, kind=kind)
         res = analyze(ws, scan)
         assert res["kind"] == kind and res["model_id"] == mid and res["recommendation"]["headline"]
+    # recalibration on a held-out set, from the command line; the analysis follows the card
+    from chargecell.cli import main
+    build_synthetic(ws, "tiny-tiebar-held-out", 16, size=32, seed=9, kind="tiebar")
+    main(["-w", str(ws.root), "calibrate", "--model", mid, "--target", "0.99",
+          "--held-out", "tiny-tiebar-held-out"])
+    card = next(m for m in ws.list_models() if m["id"] == mid)
+    assert card["calibrated_on"] == "synthetic (tiny-tiebar-held-out)" and card["tta"] is True
+    assert card["metrics"]["synthetic"]["n"] == 16
+    assert Analyzer.get(ws, mid, kind="tiebar").tta
 
 
 def test_protocol_carries_new_features(ws, oracle_analyzer):
