@@ -136,6 +136,19 @@ def found_gates(kind: str):
     return pvp_found_gates
 
 
+UNCONFIRMED_TEXT = ("The (1,1) cell appears to be in the window and every check passed, but the "
+                    "model's confidence is below its calibrated threshold.")
+
+
+def held_back_by(checks: list[str], gate_fails: list[str]) -> str | None:
+    """Why a FOUND was held back: "confidence" when only the calibrated threshold failed (the
+    guidance then asks for one confirmation scan), "checks" when a FOUND check failed, None
+    when nothing was held back."""
+    if not checks:
+        return None
+    return "checks" if gate_fails else "confidence"
+
+
 def demoted_status(sp) -> str:
     """Where a FOUND that failed its checks goes. FOUND and NOT_IN_WINDOW both mean "readable",
     so the scan is only called uninterpretable if that is more likely than readable."""
@@ -214,11 +227,12 @@ def analyze(ws: Workspace, scan: Scan, model_id: str | None = None,
 
     arg = int(np.argmax(sp))
     status = schema.STATUSES[arg]
-    demoted, checks = False, []
+    demoted, checks, gate_fails = False, [], []
     if status == schema.FOUND:
         if sp[0] < tau:
             checks.append(f"confidence {sp[0]:.2f} is below the calibrated threshold {tau:.2f}")
-        checks += pvp_found_gates(p, S)
+        gate_fails = pvp_found_gates(p, S)
+        checks += gate_fails
         if checks:
             demoted = True
             status = demoted_status(sp)
@@ -249,7 +263,8 @@ def analyze(ws: Workspace, scan: Scan, model_id: str | None = None,
                                                 scan.x_gate, scan.y_gate)
     decision = dict(status=status, reason=reason, ref=[ref_a, ref_b],
                     cell=({k: v for k, v in cell.items() if k != "mask"} if cell else None),
-                    keypoints=keypoints, held_back=demoted)
+                    keypoints=keypoints, held_back=demoted,
+                    held_back_by=held_back_by(checks, gate_fails))
     decision["spectators"] = spectator_check(scan, cfg, history)
     rec = recommend(scan, grid, cfg, decision, lattice, history, q)
 
@@ -265,7 +280,8 @@ def analyze(ws: Workspace, scan: Scan, model_id: str | None = None,
                                  else None) for g in (scan.x_gate, scan.y_gate)}}
     return {
         **base, **decision,
-        "reason_text": schema.REASON_TEXT[reason],
+        "reason_text": (UNCONFIRMED_TEXT if decision["held_back_by"] == "confidence"
+                        else schema.REASON_TEXT[reason]),
         "demotion": checks, "confidence": round(confidence, 4), "needs_review": needs_review,
         "model_id": an.model_id, "found_threshold": tau,
         "probabilities": {"status": dict(zip(schema.STATUSES, map(float, sp))),

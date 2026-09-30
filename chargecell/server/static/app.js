@@ -358,11 +358,15 @@ pages.review = {
     const w = rec.next_window && rec.kind !== "fix_then_rescan" ? onAxes(rec.next_window, sc) : null;
     if (w) {
       const col = rec.kind === "explore" ? "#A86400" : "#2E5AAC";
-      dashedRect(ctx, plot, w.x[0], w.x[1], w.y[0], w.y[1], col, rec.kind === "explore" ? "Explore here next" : "Next scan");
-      const [Xa, Ya] = plot.toScreen((x0 + x1) / 2, (y0 + y1) / 2);
-      const [Xb, Yb] = plot.toScreen((w.x[0] + w.x[1]) / 2, (w.y[0] + w.y[1]) / 2);
-      arrow(ctx, Xa, Ya, Xb, Yb, col);
-      if (rec.target && rec.kind === "move") {
+      const label = { explore: "Explore here next",
+                      confirm: `Rescan to confirm (${rec.averaging || 4}x averaging)` }[rec.kind] || "Next scan";
+      dashedRect(ctx, plot, w.x[0], w.x[1], w.y[0], w.y[1], col, label);
+      if (rec.kind !== "confirm") {   // a confirmation rescans the same window: nothing to point at
+        const [Xa, Ya] = plot.toScreen((x0 + x1) / 2, (y0 + y1) / 2);
+        const [Xb, Yb] = plot.toScreen((w.x[0] + w.x[1]) / 2, (w.y[0] + w.y[1]) / 2);
+        arrow(ctx, Xa, Ya, Xb, Yb, col);
+      }
+      if (rec.target && (rec.kind === "move" || rec.kind === "confirm")) {
         const [Xt, Yt] = plot.toScreen(rec.target[sc.xLabel], rec.target[sc.yLabel]);
         ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(Xt, Yt, 8, 0, 2 * Math.PI); ctx.stroke();
       }

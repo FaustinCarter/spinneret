@@ -158,10 +158,11 @@ def test_navigation_without_any_voltage_prior(ws, oracle_analyzer):
     assert r["correct"] == r["found"], "every FOUND must agree with the ground truth"
 
 
-def test_held_back_found_never_rescans_the_same_window(ws, oracle_analyzer, monkeypatch):
-    """A FOUND that is held back (here: every FOUND, by an unreachable threshold) must not make
-    the guidance propose the window it just scanned: it zooms out instead."""
-    from chargecell import runs
+def test_held_back_found_is_confirmed_once_then_widened(ws, oracle_analyzer, monkeypatch):
+    """A FOUND held back only by its confidence (here: every FOUND, by an unreachable threshold)
+    gets one confirmation scan of the same window with longer averaging. If that is held back
+    too, the guidance never proposes the window again: it zooms out instead."""
+    from chargecell import protocol, runs
 
     def same_as_scan(scan, xr, yr):                 # both ends within 10% of the span
         sx, sy = scan.x[-1] - scan.x[0], scan.y[-1] - scan.y[0]
@@ -171,14 +172,26 @@ def test_held_back_found_never_rescans_the_same_window(ws, oracle_analyzer, monk
     monkeypatch.setattr(oracle_analyzer, "found_threshold", 1.01)
     r = virtual.evaluate(ws, "PvP", n_devices=4, max_scans=6, seed=2)
     assert r["found"] == 0
-    held = 0
+    confirms = moved_on = 0
     for x in r["results"]:
         run = runs.load(ws, x["run_id"])
+        after_confirm = False
         for m in (n for n in run["nodes"] if n["type"] == "measure"):
             scan = ws.load_scan(m["data"]["scan_id"])
             res = ws.load_analysis(scan.id)
-            nw = (res.get("recommendation") or {}).get("next_window")
+            rec = res.get("recommendation") or {}
+            nw = rec.get("next_window")
             if res["status"] == "NOT_IN_WINDOW" and nw:
-                assert not same_as_scan(scan, nw["x"][:2], nw["y"][:2]), res["recommendation"]
-                held += bool(res.get("held_back"))
-    assert held >= 2
+                same = same_as_scan(scan, nw["x"][:2], nw["y"][:2])
+                if rec["kind"] == "confirm":
+                    assert res["held_back_by"] == "confidence" and same and not after_confirm
+                    assert rec["averaging"] == 4 and "confirm" in rec["headline"]
+                    resp = protocol.response_from_analysis(res, ws.get_device(scan.device))
+                    assert resp.outcome == "next_scan" and resp.next_scan.purpose == "confirm"
+                    assert resp.next_scan.averaging == 4
+                    confirms += 1
+                else:
+                    assert not same, rec
+                    moved_on += after_confirm
+            after_confirm = rec.get("kind") == "confirm"
+    assert confirms >= 2 and moved_on >= 1, (confirms, moved_on)

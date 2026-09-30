@@ -335,6 +335,9 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
         return rec
 
     # ------------------------------------------------------------------ NOT_IN_WINDOW
+    if decision.get("held_back_by") == "confidence" and confirm_rescan(
+            scan, cfg, history, rec, "(1,1) appears", (decision.get("cell") or {}).get("centroid_v")):
+        return rec
     la, lb = lattice["a"], lattice["b"]
     ref_a, ref_b = decision["ref"][0], decision["ref"][1]
 
@@ -635,6 +638,38 @@ def common_fix(reason: str, cfg: DeviceConfig) -> tuple[str, list[str]] | None:
                  "If it persists: sweep more slowly, avoid large steps, and check for a noisy "
                  "gate line."])
     return None
+
+
+CONFIRM_AVERAGING = 4.0     # how much longer a confirmation scan integrates per point
+
+
+def confirm_rescan(scan: Scan, cfg: DeviceConfig, history, rec: dict, seen: str,
+                   target: dict | None = None) -> bool:
+    """A FOUND held back only by its confidence (every other check passed) is most often the
+    right window, scanned too noisily to be sure. Fill ``rec`` with one rescan of the same window
+    with longer averaging, unless this window was already scanned without success in the last
+    few scans (then the caller moves on, e.g. to a wider window). ``seen`` completes "... to be
+    in this window", e.g. "(1,1) appears". Returns whether ``rec`` was filled."""
+    xg, yg = scan.x_gate, scan.y_gate
+    x_rng = [float(scan.x[0]), float(scan.x[-1])]
+    y_rng = [float(scan.y[0]), float(scan.y[-1])]
+    if revisited_window(history, xg, yg, x_rng, y_rng, recent=3):
+        return False
+    nx, ny = scan.signal.shape[1], scan.signal.shape[0]
+    f = CONFIRM_AVERAGING
+    rec.update(kind="confirm", confidence="medium", target=target, move={xg: 0.0, yg: 0.0},
+               averaging=f, basis="every check passed except the confidence threshold",
+               next_window={"x_gate": xg, "y_gate": yg, "x": [*x_rng, nx], "y": [*y_rng, ny]})
+    rec["headline"] = (f"{seen} to be in this window, but the model is not sure enough to call "
+                       f"it found. Rescan the same window with {f:g}x longer averaging to "
+                       "confirm.")
+    rec["steps"] += [
+        f"Check the sensor ({cfg.sensor_gate}) sits on the steepest flank of its Coulomb peak "
+        "at the centre of this window; retune it if it has drifted.",
+        f"Average {f:g}x longer per point: noise falls as 1/sqrt(time), so this halves it.",
+        window_step(scan, x_rng, y_rng, nx, ny).replace("Next scan:", "Next scan (same window):"),
+        "If the rescan is still not conclusive, ChargeCell will suggest a wider window."]
+    return True
 
 
 def widen_if_revisited(history, scan: Scan, x_rng: list, y_rng: list, warnings: list,

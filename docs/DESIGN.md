@@ -127,8 +127,16 @@ FOUND requires **all** of:
 Otherwise the result is demoted and flagged for review. A demoted scan becomes "can't
 interpret" only if the network gives that more than 50%: FOUND and "not in window" both mean
 "readable", so a confident-but-unverified FOUND becomes "not in window" with the reason taken
-from the failed check. Hard quality failures (non-finite data, constant signal, tiny scans) skip
-the model.
+from the failed check. `held_back_by` records why: `checks` (one of checks 2-6 failed) or
+`confidence` (only the threshold did; the guidance then asks for a confirmation scan, §7). Hard
+quality failures (non-finite data, constant signal, tiny scans) skip the model.
+
+The threshold is calibrated on held-out synthetic scans for the **final** decision: the smallest
+threshold at which FOUND calls that also pass checks 2-6 reach the target precision (0.97).
+Predictions are averaged over test-time augmentations (the polarity flip and, for PvP, the axis
+swap), both at calibration and in analysis; the model card records `tta` so older models keep
+the plain ensemble their threshold was calibrated with. PvT and tie-bar scans use the same
+scheme with their own checks (`found_gates(kind)`).
 
 ## 7. Guidance (`chargecell/analysis/recommend.py`)
 
@@ -153,6 +161,12 @@ Everything is computed in the model's index grid and converted to volts at the e
   view and is 1.5x wider, rather than guessing a voltage. Target windows are about 3.4 cells,
   shifted toward the empty region so that more than a full cell of it is in view, and are never
   shrunk on an unmeasured spacing. Points are set to about 12 per addition voltage.
+- **Confirm once.** A FOUND held back only by the confidence threshold (every geometric check
+  passed) is most often the right window scanned a little too noisily. The guidance asks for one
+  rescan of the same window with 4x longer averaging (`kind` `confirm`; protocol purpose
+  `confirm` with `averaging` 4), unless the same window was already scanned without success in
+  the last three scans of the pair. Then the rules below apply. The same holds for PvT and tie
+  bar.
 - **No circles.** A window that was already scanned without success is not proposed again: the
   next scan covers both it and the present window. If that is the present window itself (the
   guidance would rescan what it just saw, typically after a FOUND was held back), the next

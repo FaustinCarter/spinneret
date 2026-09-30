@@ -232,15 +232,20 @@ regime rows, transposed so the plunger is on x (`plunger_on_x`); tie-bar region 
 `group_split` splits by `device|cooldown`. `CSDDataset` augments with polarity flips and
 transposes (a transpose swaps A and B labels). `train`: trains the ensemble members
 (OneCycle LR, optional `max_minutes`), then `full_metrics` on validation sets,
-`calibrate_found_threshold` (smallest threshold reaching `target_precision`), writes the model
-card, and activates the model if none is active. The line loss weighs line pixels per family
+`calibrate_found_threshold(p, is_found, target, eligible)` (smallest threshold at which the
+FOUND calls that also pass the analysis's checks, `analysis.decide.found_gates(kind)`, reach
+`target_precision`), writes the model card, and activates the model if none is active.
+`recalibrate(ws, model_id)` redoes the calibration of a trained model on its validation split.
+`predict_batch(models, x, tta)` averages the ensemble and, with `tta`, the polarity-flipped and
+(PvP) axis-swapped views (`_untranspose` maps swapped outputs back: occ_a <-> occ_b, line
+families a <-> b, ref order). `TTA = True` is used for calibration and recorded in the card. The line loss weighs line pixels per family
 (`LINE_POS_WEIGHT`: 8 for interdot, spectator, sensor and tie bar, else 4). Progress callback: `(fraction, message,
 record|None)`.
 
 ### model/infer.py
 `Grid` (index <-> volts, including holes). `canonical_signal` resamples and orients.
-`Analyzer.get(ws, model_id)` loads and caches an ensemble. **Clear `Analyzer._cache` after
-training** (the server does). Tests monkeypatch `Analyzer.get` to return the OracleAnalyzer.
+`Analyzer.get(ws, model_id)` loads and caches an ensemble; `Analyzer.tta` follows the card's
+`tta` (older cards: off). **Clear `Analyzer._cache` after training** (the server does). Tests monkeypatch `Analyzer.get` to return the OracleAnalyzer.
 
 ### analysis/decide.py
 `analyze(ws, scan, model_id=None, cfg=None)`: quality hard fail -> UNINTERPRETABLE without the
@@ -252,8 +257,11 @@ cell geometry, keypoints, the lattice, spectator check, recommendation, and over
 threshold, or max p < 0.6. Two geometric FOUND checks do not trust the anchor heads:
 `empty_region_too_narrow` (the n = 0 region must be ≥ `ANCHOR_WIDTH` = 1.3 spacings) and
 `hidden_line_in_empty` (no column of the eroded n = 0 region may carry a mean line probability
-above `HIDDEN_LINE` = 0.22). `decision["held_back"]` tells the guidance that a FOUND was
-demoted. `prediction_for_annotation` gives a prediction on the scan's own grid (for drafts).
+above `HIDDEN_LINE` = 0.22). All FOUND checks except the threshold are `pvp_found_gates(p, S)`
+(`found_gates(kind)` returns each kind's). `decision["held_back"]` tells the guidance that a
+FOUND was demoted, `held_back_by` whether only the threshold failed (`confidence`) or a check
+(`checks`); `reason_text` then says the call was unconfirmed. `prediction_for_annotation`
+gives a prediction on the scan's own grid (for drafts).
 
 ### analysis/lattice.py
 `extract_lattice(occ_a, occ_b, lines_p, ref_a, ref_b)`. An anchored dot uses the per-row first
@@ -272,7 +280,10 @@ beats exploration. The window is 3.2 cells (never shrunk on an unmeasured spacin
 `max_step` (reported window = first step, target = final). Windows are kept inside safe limits.
 Reason-specific fixes apply for UNINTERPRETABLE (too coarse: at least twice the points). A
 suggestion equal to the present window (`same_as_scan`) is replaced by a 1.5x wider one
-(`widened`), also in `widen_if_revisited` for PvT and tie bar. Without a known spacing, new
+(`widened`), also in `widen_if_revisited` for PvT and tie bar. `confirm_rescan` (all kinds):
+for `held_back_by == "confidence"`, one rescan of the same window with `CONFIRM_AVERAGING` = 4
+(`kind` `confirm`, `averaging`), unless `revisited_window(..., recent=3)` finds it scanned
+already. Without a known spacing, new
 windows keep the present point pitch.
 
 ### importers
@@ -325,11 +336,12 @@ the closed loop per kind (`evaluate_navigation` = PvP), records each device's lo
 `_found_is_right`, `pvt_found_is_right`, `tiebar_found_is_right`). Start windows are three
 typical spacings (`start_window`); tie-bar runs start near the true tie bar (`_tiebar_start`).
 The simulated operator follows the advice (`apply_advice`: gate changes such as an exchange gate,
-a sensor retune before a tie-bar zoom, then `follow_fix`: retune the sensor at the next window's
-centre for sensor_insensitive/low_snr, average 4x longer for low_snr via `snr_boost`). The
-sensor is tuned at the starting voltages (`_tune_sensor`, stored in `vd["sensor"]` and applied
-by `device_state`), and couples at most 0.65 as strongly to one of P1/P2 as to the other (a
-readout sensor must see the interdot step), drawn from a separate random stream.
+a sensor retune and longer averaging for a `confirm` step, a sensor retune before a tie-bar
+zoom, then `follow_fix`: retune the sensor at the next window's centre for
+sensor_insensitive/low_snr, average 4x longer for low_snr via `snr_boost`). The sensor is tuned
+at the starting voltages (`_tune_sensor`, stored in `vd["sensor"]` and applied by
+`device_state`), and couples to the far one of P1/P2 at 0.35-0.65 of the near one (a readout
+sensor must see the interdot step), drawn from a separate random stream.
 
 ## 4. HTTP API (`server/app.py`)
 

@@ -135,3 +135,32 @@ Each entry: the decision, why, and what would change it. Newest last.
     line loss weighs sensor, spectator and interdot pixels twice as much. Practice devices now
     follow the fixes ChargeCell asks for (retune the sensor, average longer), so closed-loop
     numbers measure the guidance rather than an operator who ignores it.
+
+27. **Calibrate FOUND on the final decision.** The threshold used to be calibrated on the status
+    head alone, but a FOUND also has to pass the geometric checks, so the precision it bought was
+    not the precision of the calls the operator sees. Each kind's checks are now a function
+    (`found_gates(kind)`), training applies them before calibrating, and `recalibrate()` updates
+    existing models. The target stays 0.97 on held-out synthetic scans (the acceptance bar is
+    0.95); the checks were not loosened.
+
+28. **Test-time augmentation.** Each prediction is averaged over the polarity flip and, for PvP,
+    the axis swap (with dot A and B outputs swapped back). Both are exact symmetries of the input
+    features and were used in training, so this costs only compute (4x for PvP, 2x otherwise, a
+    few hundred milliseconds per scan on a CPU). On the second PvP model it removed the two
+    wrong FOUNDs of the closed loop (12/30 with 2 wrong became 9/30 with none). The model card
+    records `tta`; the analysis uses it only for models calibrated with it.
+
+29. **Practice sensors see both dots.** The readout sensor of a practice P1-P2 pair couples to
+    the far dot at 35-65% of the near dot (it was 15-65%). A readout sensor must resolve the
+    (1,1)-(2,0) interdot transition, so an operator tunes it to see both dots; at 15% the far
+    dot's lines were close to invisible and the closed loop measured the sensor rather than the
+    guidance.
+
+30. **Confirm once before zooming out (amends 25).** In the closed loop, most practice scans that
+    held (1,1) were called FOUND by the network but held back by the calibrated threshold (0.985
+    for the second PvP model, forced up by noisy scans that the simulator labels "can't
+    interpret"), and decision 25 then zoomed out, away from the cell. A FOUND held back only by
+    the threshold, with every geometric check passed, now gets one rescan of the same window
+    with 4x longer averaging, as an expert would do before calling it. The FOUND checks and the
+    threshold are unchanged. A window is confirmed at most once; after that, decision 25 applies.
+    Scan ids now carry milliseconds so the scan history is in order even for fast loops.

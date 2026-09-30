@@ -82,6 +82,13 @@ sees (1,1) but a safety check held it back (for example, not enough of the empty
 view to count electrons from). The next window is usually wider, so that the empty region and the
 neighbouring cells are in view.
 
+**"(1,1) appears to be in this window ... Rescan the same window with 4x longer averaging to
+confirm"** means every check passed except the model's confidence, which is below the level
+calibrated for a safe "found". This usually means the scan was a little noisy. Check that the
+sensor sits on the steepest flank of its peak, integrate 4 times longer per point, and scan the
+same window again. ChargeCell asks for this at most once per window; if the rescan is still not
+conclusive, it suggests a wider window. The same applies to PvT and tie-bar scans.
+
 ## Doing the move safely
 
 - **Copy settings** gives you the next window as text.

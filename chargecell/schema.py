@@ -77,7 +77,9 @@ def now_iso() -> str:
 
 
 def new_id(prefix: str = "scan") -> str:
-    stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    """Ids sort in creation order (to the millisecond): the analysis history relies on it."""
+    now = _dt.datetime.now()
+    stamp = now.strftime("%Y%m%d-%H%M%S") + f"{now.microsecond // 1000:03d}"
     return f"{prefix}-{stamp}-{uuid.uuid4().hex[:6]}"
 
 

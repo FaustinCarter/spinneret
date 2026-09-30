@@ -127,7 +127,7 @@ Unknown fields are rejected, so typos surface as errors instead of being silentl
 | outcome | status | Meaning | Where to look |
 |---|---|---|---|
 | `found` | `FOUND` | PvP: (1,1) is in the window and the empty region (more than an electron spacing of it) is visible for both dots, so the count is certain. PvT: the empty dot and its first two loading lines are traced where electrons load cleanly. Tiebar: the tie bar and both triple points are in the window. | `features`. PvP: `next_scan` may hold a `readout_zoom` window to send as a `tiebar` scan. Tiebar: `next_scan` may be `retune_coupling` (change an exchange gate, rescan). |
-| `next_scan` | `NOT_IN_WINDOW` | ChargeCell is confident where to look next (guidance confidence high or medium). | `next_scan` |
+| `next_scan` | `NOT_IN_WINDOW` | ChargeCell is confident where to look next (guidance confidence high or medium). `next_scan.purpose` `confirm`: the goal appears to be in this window and every check passed except the confidence threshold, so rescan the same window once with `next_scan.averaging` times longer integration. | `next_scan` |
 | `no_confident_step` | `UNINTERPRETABLE`, or `NOT_IN_WINDOW` with nothing to navigate by | ChargeCell could not turn this scan into a next step with confidence. `reason` says why. | `suggestion` (best guess, for a person to review), `headline`, `steps` |
 
 For `UNINTERPRETABLE` scans, `suggestion.purpose` is `rescan_after_fix`: fix the named problem
@@ -168,7 +168,7 @@ Clients should ignore feature types and properties they do not know.
 
 | Field | Meaning |
 |---|---|
-| `purpose` | `locate` (move toward the goal), `rescan_after_fix`, `readout_zoom` (PvP → take a tie-bar scan), or `retune_coupling` (tiebar: change the exchange gate in `gate_changes`, rescan) |
+| `purpose` | `locate` (move toward the goal), `confirm` (rescan the same window with longer averaging; asked at most once per window), `rescan_after_fix`, `readout_zoom` (PvP → take a tie-bar scan), or `retune_coupling` (tiebar: change the exchange gate in `gate_changes`, rescan) |
 | `scan_kind` | The kind to send the next scan as (`tiebar` for a readout zoom, else the same kind). |
 | `window` | Absolute start/stop in volts and the number of points for both swept gates. Always inside the device's safe limits. |
 | `move` | Change of the window centre for each swept gate (V). If the full move is larger than `max_step`, ChargeCell gives only the first step and says so in `warnings`. The move can exceed `max_step` only when the window had to be shifted inside the safe limits, which `warnings` also reports. |
@@ -176,6 +176,7 @@ Clients should ignore feature types and properties they do not know.
 | `physical_moves` | The move in physical gates, when the scan was in virtual gates and the device has a virtual-gate matrix. |
 | `max_step` | Largest DC step the device allows (V), from the device settings. Ramp in steps no larger than this. `null`: no limit is set; moves were then limited to one window width. |
 | `confidence`, `basis` | How the step was computed (`high`: from anchored transitions in this scan). |
+| `averaging` | `confirm` only: integrate this many times longer per point than the scan just sent (4: noise halves). Otherwise `null`. |
 
 ## Submitting training data
 

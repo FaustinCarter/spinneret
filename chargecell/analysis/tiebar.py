@@ -28,11 +28,13 @@ from ..schema import Scan
 from ..simulate.tiebar import FWHM_K, FWHM_T, readout_offset
 from ..storage import Workspace
 from ..units import fmt_mag, fmt_v
-from .decide import HARD_FAIL_REASON, demoted_status
-from .recommend import (common_fix, describe_move, finalize_window, widen_if_revisited,
-                        window_step)
+from .decide import HARD_FAIL_REASON, demoted_status, held_back_by
+from .recommend import (common_fix, confirm_rescan, describe_move, finalize_window,
+                        widen_if_revisited, window_step)
 
 SPEC = kinds.TIEBAR
+UNCONFIRMED_TEXT = ("The tie bar and both triple points appear to be in the window and every "
+                    "check passed, but the model's confidence is below its calibrated threshold.")
 R11, R20, R10, R21, OTHER = range(5)
 K_B = 8.617333e-5          # eV / K
 STRONG_RATIO = 0.45        # warn: close to the ratio where the triple points merge
@@ -167,13 +169,15 @@ def analyze_tiebar(ws: Workspace, scan: Scan, model_id: str | None = None,
     geo = tiebar_geometry(region, p["lines_p"][2])
     tau = an.found_threshold
     status = schema.STATUSES[int(np.argmax(sp))]
-    checks = []
+    checks, gate_fails = [], []
     if status == schema.FOUND:
         if sp[0] < tau:
             checks.append(f"confidence {sp[0]:.2f} is below the calibrated threshold {tau:.2f}")
-        checks += _gate_checks(geo)
+        gate_fails = _gate_checks(geo)
+        checks += gate_fails
         if checks:
             status = demoted_status(sp)
+    held = held_back_by(checks, gate_fails)
     allowed = SPEC.reasons_for(status)
     reason = allowed[int(np.argmax(rp[[SPEC.reasons.index(r) for r in allowed]]))]
     if checks and status == schema.NOT_IN_WINDOW:
@@ -213,12 +217,13 @@ def analyze_tiebar(ws: Workspace, scan: Scan, model_id: str | None = None,
     mi = float(p["mutual_info"])
     needs_review = bool(checks or mi > an.uncertainty_threshold or sp.max() < 0.6)
     rec = recommend_tiebar(scan, grid, cfg, status, reason, geo, dict(keypoints=keypoints,
-                           coupling=coupling), history, q)
+                           coupling=coupling), history, q, held_back_by=held)
     overlays = dict(size=S, x_gate=xg, y_gate=yg,
                     extent=[grid.x0, grid.x0 + (S - 1) * grid.dx, grid.y0, grid.y0 + (S - 1) * grid.dy])
     return {
-        **base, "status": status, "reason": reason, "reason_text": SPEC.reason_text[reason],
-        "demotion": checks, "confidence": round(confidence, 4), "needs_review": needs_review,
+        **base, "status": status, "reason": reason,
+        "reason_text": UNCONFIRMED_TEXT if held == "confidence" else SPEC.reason_text[reason],
+        "held_back": bool(checks), "held_back_by": held, "demotion": checks, "confidence": round(confidence, 4), "needs_review": needs_review,
         "model_id": an.model_id, "found_threshold": tau,
         "probabilities": {"status": dict(zip(schema.STATUSES, map(float, sp))),
                           "reason": dict(zip(SPEC.reasons, map(float, rp))),
@@ -276,7 +281,8 @@ def last_readout_boundary(history, xg: str, yg: str):
 
 
 def recommend_tiebar(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: str, reason: str,
-                     geo: dict | None, res: dict, history, quality: dict) -> dict:
+                     geo: dict | None, res: dict, history, quality: dict,
+                     held_back_by: str | None = None) -> dict:
     xg, yg = scan.x_gate, scan.y_gate
     warnings: list[str] = []
     steps: list[str] = []
@@ -356,6 +362,9 @@ def recommend_tiebar(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: s
         return rec
 
     # NOT_IN_WINDOW
+    if held_back_by == "confidence" and confirm_rescan(
+            scan, cfg, history, rec, "The tie bar appears", res["keypoints"].get("tiebar_mid")):
+        return rec
     S = grid.size
     c0 = (S - 1) / 2
     zoom = 1.0

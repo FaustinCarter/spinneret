@@ -26,12 +26,14 @@ from ..quality import quality_metrics
 from ..schema import Scan
 from ..storage import Workspace
 from ..units import fmt_mag, fmt_v
-from .decide import ANCHOR_WIDTH, HIDDEN_LINE, demoted_status
+from .decide import ANCHOR_WIDTH, HIDDEN_LINE, demoted_status, held_back_by
 from .lattice import _fit, _from_line_map
-from .recommend import (common_fix, describe_move, finalize_window, widen_if_revisited,
-                        window_step, _points)
+from .recommend import (_points, common_fix, confirm_rescan, describe_move, finalize_window,
+                        widen_if_revisited, window_step)
 
 SPEC = kinds.PVT
+UNCONFIRMED_TEXT = ("The empty dot and its first two loading lines appear to be traced and every "
+                    "check passed, but the model's confidence is below its calibrated threshold.")
 SLOW, GOOD, OPEN = 0, 1, 2
 
 
@@ -203,13 +205,15 @@ def analyze_pvt(ws: Workspace, scan: Scan, model_id: str | None = None,
 
     tau = an.found_threshold
     status = schema.STATUSES[int(np.argmax(sp))]
-    checks = []
+    checks, gate_fails = [], []
     if status == schema.FOUND:
         if sp[0] < tau:
             checks.append(f"confidence {sp[0]:.2f} is below the calibrated threshold {tau:.2f}")
-        checks += pvt_found_gates(p, S)
+        gate_fails = pvt_found_gates(p, S)
+        checks += gate_fails
         if checks:
             status = demoted_status(sp)
+    held = held_back_by(checks, gate_fails)
     allowed = SPEC.reasons_for(status)
     reason = allowed[int(np.argmax(rp[[SPEC.reasons.index(r) for r in allowed]]))]
     if checks and status == schema.NOT_IN_WINDOW:
@@ -265,13 +269,14 @@ def analyze_pvt(ws: Workspace, scan: Scan, model_id: str | None = None,
 
     rec = recommend_pvt(scan, grid, cfg, status, reason,
                         dict(lines=lines, unindexed=unindexed, rows=rows, ref=ref,
-                             keypoints=keypoints), q, history)
+                             keypoints=keypoints), q, history, held_back_by=held)
     overlays = dict(size=S, x_gate=scan.x_gate, y_gate=scan.y_gate,
                     extent=[grid.x0, grid.x0 + (S - 1) * grid.dx, grid.y0, grid.y0 + (S - 1) * grid.dy],
                     rows=rows.tolist())
     return {
-        **base, "status": status, "reason": reason, "reason_text": SPEC.reason_text[reason],
-        "demotion": checks, "confidence": round(confidence, 4), "needs_review": needs_review,
+        **base, "status": status, "reason": reason,
+        "reason_text": UNCONFIRMED_TEXT if held == "confidence" else SPEC.reason_text[reason],
+        "held_back": bool(checks), "held_back_by": held, "demotion": checks, "confidence": round(confidence, 4), "needs_review": needs_review,
         "model_id": an.model_id, "found_threshold": tau, "ref": [ref],
         "probabilities": {"status": dict(zip(schema.STATUSES, map(float, sp))),
                           "reason": dict(zip(SPEC.reasons, map(float, rp))),
@@ -298,7 +303,7 @@ def _spacing_index(lines: list[dict], cfg: DeviceConfig, gate: str, grid: Grid |
 
 
 def recommend_pvt(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: str, reason: str,
-                  geo: dict, quality: dict, history=()) -> dict:
+                  geo: dict, quality: dict, history=(), held_back_by: str | None = None) -> dict:
     xg, yg = scan.x_gate, scan.y_gate
     warnings: list[str] = []
     steps: list[str] = []
@@ -342,6 +347,9 @@ def recommend_pvt(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: str,
         return rec
 
     # NOT_IN_WINDOW: move in index space, then convert and make safe
+    if held_back_by == "confidence" and confirm_rescan(
+            scan, cfg, history, rec, "The empty dot and its first two loading lines appear"):
+        return rec
     S = grid.size
     c0 = (S - 1) / 2
     lines = geo.get("lines", [])

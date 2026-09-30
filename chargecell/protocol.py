@@ -265,7 +265,7 @@ class Feature(_Strict):
 
 
 class ScanStep(_Strict):
-    purpose: Literal["locate", "rescan_after_fix", "readout_zoom", "retune_coupling"]
+    purpose: Literal["locate", "rescan_after_fix", "readout_zoom", "retune_coupling", "confirm"]
     scan_kind: str = Field("PvP", description="send the next scan with this kind (the readout "
                                               "zoom is a tiebar scan)")
     window: Window
@@ -281,6 +281,9 @@ class ScanStep(_Strict):
                           "window width")
     confidence: Literal["high", "medium", "low"]
     basis: str = ""
+    averaging: Optional[float] = Field(
+        None, description="purpose confirm: integrate this many times longer per point than the "
+                          "scan just sent (same window)")
 
 
 class RunRef(_Strict):
@@ -336,7 +339,8 @@ def response_from_analysis(analysis: dict, cfg: DeviceConfig,
             move={g: d for g, d in move.items() if g in swept} if purpose == "locate" else {},
             gate_changes={g: d for g, d in move.items() if g not in swept},
             physical_moves=rec.get("physical_moves") if purpose == "locate" else None,
-            max_step=cfg.max_step, confidence=confidence, basis=rec.get("basis", ""))
+            max_step=cfg.max_step, confidence=confidence, basis=rec.get("basis", ""),
+            averaging=rec.get("averaging") if purpose == "confirm" else None)
 
     if status == schema.FOUND and analysis.get("kind", "PvP") != "PvP":
         outcome = "found"
@@ -355,6 +359,9 @@ def response_from_analysis(analysis: dict, cfg: DeviceConfig,
                 features.append(Feature(type="transition_point", label=lab, point=kp[key]))
         if rec.get("tiebar_window"):
             next_scan = step("readout_zoom", rec["tiebar_window"], "high")
+    elif status == schema.NOT_IN_WINDOW and rec.get("kind") == "confirm":
+        outcome = "next_scan"
+        next_scan = step("confirm", rec["next_window"], rec["confidence"])
     elif status == schema.NOT_IN_WINDOW and rec.get("next_window") and \
             rec.get("confidence") in ("high", "medium"):
         outcome = "next_scan"
