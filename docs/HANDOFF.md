@@ -57,7 +57,7 @@ hole-device labelling were not chosen.
 
 ## 3. Verified results (reproducible)
 
-- `pytest -q`: 33 tests (about 3 minutes on 4 cores; `test_kinds.py` trains tiny models).
+- `pytest -q`: 35 tests (about 3 minutes on 4 cores; `test_kinds.py` trains tiny models).
 - Guidance with perfect perception, 30 practice devices each (`python scripts/nav_trace.py
   --oracle --bench --kind <kind>`), every FOUND correct: PvP 30/30 (median 3 scans; 30/30 also
   with `--no-prior`), PvT 30/30 (median 3 since the stricter anchoring; half the devices start
@@ -85,6 +85,21 @@ hole-device labelling were not chosen.
     closed loop 2/20. Practice sensors could not see the interdot step (truly too noisy in half
     the scans); practice devices now have a readout-capable sensor, and the model gets twice
     the data and longer training.
+  - PvP v2 (96 px, 3 x 14 epochs, 8000 scans): threshold 0.995, recall 0.19, closed loop 4/30.
+    Calibrated on the final decision (DECISIONS 27): 0.985, recall 0.35, closed loop 12/30 with
+    2 wrong; with test-time augmentation (DECISIONS 28): 9/30, none wrong; with the confirm
+    step (DECISIONS 30): 8/30, none wrong. On the practice scans that held (1,1) the network
+    mostly said FOUND at 0.8-0.98, below the threshold. The threshold was forced up by scans the
+    simulator wrongly labelled too noisy (DECISIONS 31). Recalibrated against corrected labels
+    on 2500 held-out scans: threshold 0.585, precision 0.97, recall 0.66. (A calibration on
+    scans from the training seeds gave 0.5 and a closed loop of 23/30 with 4 wrong FOUNDs at
+    confidence 0.57-0.82: a sensor peak read as two transitions, a strongly tilted pattern with
+    the dots mixed up, a faint far-dot line hallucinated, a cell sliver at the window edge.)
+  - PvT v2 (64 px, 2 x 12 epochs, 6000 scans): held-out 0.967 / 0.586, closed loop 7/20 with 3
+    wrong. PvT v3 (7000 scans, stricter anchoring labels, old noise labels; final-decision
+    calibration and TTA): threshold 0.985, held-out precision 1.0, recall 0.50, closed loop
+    9/20 with 2 wrong.
+  - All three kinds were then retrained on data with the corrected noise labels (below).
 
 ## 4. Unfinished work, in priority order
 
@@ -174,7 +189,7 @@ tie-bar coupling ratio against independent tunnel-coupling measurements.
 ```bash
 git lfs install && git lfs pull
 pip install -e ".[dev]"
-pytest -q                                              # expect 24 passed
+pytest -q                                              # expect 35 passed
 python scripts/nav_trace.py --oracle --bench --kind PvP   # and PvT, tiebar: expect 30/30
 chargecell -w /tmp/demo serve --no-browser             # GUI; practice devices on the Scans page
 ```

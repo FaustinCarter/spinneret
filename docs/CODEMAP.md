@@ -37,7 +37,7 @@ chargecell/
   server/static/       index.html, style.css, plot.js, app.js (no build step)
   cli.py, __main__.py  command line
 tests/                 conftest (OracleAnalyzer), test_core, test_guidance, test_api,
-                       test_protocol, test_kinds, test_runs
+                       test_protocol, test_kinds, test_labels_kinds, test_runs, test_tta
 scripts/               train_starter, eval_model, nav_trace, gui_check
 ```
 
@@ -421,7 +421,9 @@ numerals.
   `Analyzer.get`).
 - `test_core.py`: simulator, label round trip, unknown offsets, generic importers.
 - `test_guidance.py`: decisions and targets with perfect perception, safety limits and step
-  splitting, closed-loop navigation, confidence downgrade for stacked indexed lines.
+  splitting, closed-loop navigation (also without any voltage prior), confidence downgrade for
+  stacked indexed lines, a FOUND held back by confidence confirmed once (same window, 4x
+  averaging, protocol purpose `confirm`) and then widened.
 - `test_protocol.py`: request forms and validation, a practice device driven to (1,1) purely
   through `/api/v1/analyze` (via `chargecell.client`), training submission, errors, CLI file
   mode.
@@ -438,5 +440,7 @@ numerals.
   as a graded tree in depth-first order, advice following, device-run grouping and the 4-hour
   gap, closed runs, errors; practice closed loops as runs with truth-checked FOUNDs, reviews,
   actions, statistics, a wrong FOUND failing its stage; the GUI practice loop and labels.
+- `test_tta.py`: the feature symmetries behind test-time augmentation, and the mapping of
+  axis-swapped outputs back to dot A and B (with a network that is equivariant by construction).
 - Guidance benchmarks outside pytest: `scripts/nav_trace.py --oracle --bench --kind PvP|PvT|tiebar
   [--no-prior] [-v]` (30 devices).
