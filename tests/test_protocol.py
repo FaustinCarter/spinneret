@@ -70,9 +70,9 @@ def test_navigation_over_http(ws, oracle_analyzer):
     tc = TestClient(create_app(ws.root))
     cc = _TestClientCC(tc)
     vd = virtual.create(ws, seed=11)
-    vs = vd["voltage_state"]
-    win = {"x": {"gate": "P1", "start": vs["P1"] - 0.045, "stop": vs["P1"] + 0.045, "points": 90},
-           "y": {"gate": "P2", "start": vs["P2"] - 0.045, "stop": vs["P2"] + 0.045, "points": 90}}
+    (x0, x1, nx), (y0, y1, ny) = virtual.start_window(vd)
+    win = {"x": {"gate": "P1", "start": x0, "stop": x1, "points": nx},
+           "y": {"gate": "P2", "start": y0, "stop": y1, "points": ny}}
     outcomes = []
     for k in range(8):
         m = virtual.measure(ws, vd["id"], win["x"]["gate"], win["y"]["gate"],
@@ -98,7 +98,10 @@ def test_navigation_over_http(ws, oracle_analyzer):
         assert step is not None, r
         lo, hi = ws.get_device(m.device).limits(step["window"]["x"]["gate"])
         assert lo <= step["window"]["x"]["start"] and step["window"]["x"]["stop"] <= hi
-        assert step["max_step"] > 0
+        # no step limit configured: each move stays within one window width of the last scan
+        assert step["max_step"] is None
+        for g, span in ((win["x"]["gate"], m.x[-1] - m.x[0]), (win["y"]["gate"], m.y[-1] - m.y[0])):
+            assert abs(step["move"].get(g, 0.0)) <= abs(span) * 1.001 + 1e-12
         win = step["window"]
     assert outcomes[-1] == "found", outcomes
 
@@ -142,9 +145,7 @@ def test_training_submission_and_errors(ws, tmp_path):
 def test_cli_file_mode(ws, oracle_analyzer, tmp_path, capsys):
     from chargecell.cli import main
     vd = virtual.create(ws, seed=3)
-    vs = vd["voltage_state"]
-    m = virtual.measure(ws, vd["id"], "P1", "P2", (vs["P1"] - 0.045, vs["P1"] + 0.045, 64),
-                        (vs["P2"] - 0.045, vs["P2"] + 0.045, 64))
+    m = virtual.measure(ws, vd["id"], "P1", "P2", *virtual.start_window(vd, points=64))
     f = tmp_path / "scan42.json"
     f.write_text(json.dumps(make_request(m.signal, m.x, m.y, "P1", "P2",
                                          voltage_state=m.voltage_state, request_id="r42",

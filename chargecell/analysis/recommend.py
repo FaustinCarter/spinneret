@@ -22,14 +22,13 @@ from .. import schema
 from ..config import DeviceConfig
 from ..model.infer import Grid
 from ..schema import Scan
+from ..units import fmt_dv, fmt_mag, fmt_v
 
-
-def _mv(v: float) -> str:
-    return f"{v * 1e3:+.1f} mV"
+_mv = fmt_dv
 
 
 def _v(v: float) -> str:
-    return f"{v:.4f} V"
+    return fmt_v(v)
 
 
 def _points(width_v: float, spacing_v: float | None, cfg: DeviceConfig, current: int) -> int:
@@ -57,12 +56,17 @@ def history_prior(history: list[tuple[dict, dict]], x_gate: str, y_gate: str) ->
                 voltage_state=meta.get("voltage_state", {}))
 
 
-def history_spacing(history: list[tuple[dict, dict]], gate: str) -> float | None:
+def history_spacings(history: list[tuple[dict, dict]], gate: str) -> list[float]:
     vals = []
     for _, ana in history:
         sp = (ana.get("lattice_v") or {}).get("spacing", {})
         if sp.get(gate):
-            vals.append(sp[gate])
+            vals.append(float(sp[gate]))
+    return vals
+
+
+def history_spacing(history: list[tuple[dict, dict]], gate: str) -> float | None:
+    vals = history_spacings(history, gate)
     return float(np.median(vals)) if vals else None
 
 
@@ -108,13 +112,45 @@ def spectator_check(scan: Scan, cfg: DeviceConfig, history: list[tuple[dict, dic
     return out
 
 
+def revisited_window(history: list[tuple[dict, dict]], x_gate: str, y_gate: str, x_rng: list,
+                     y_rng: list, recent: int = 6) -> str | None:
+    """Id of a recent unsuccessful scan of (nearly) the same window, if any."""
+    wx, wy = x_rng[1] - x_rng[0], y_rng[1] - y_rng[0]
+    n = 0
+    for meta, ana in history:                      # newest first
+        if meta.get("x_gate") != x_gate or meta.get("y_gate") != y_gate:
+            continue
+        n += 1
+        if n > recent:
+            break
+        ex = meta.get("extent")
+        if not ex or ana.get("status") == schema.FOUND:
+            continue
+        x0, x1, y0, y1 = ex
+        if (abs((x0 + x1) / 2 - np.mean(x_rng)) < 0.25 * abs(wx)
+                and abs((y0 + y1) / 2 - np.mean(y_rng)) < 0.25 * abs(wy)
+                and 0.7 < (x1 - x0) / wx < 1.4 and 0.7 < (y1 - y0) / wy < 1.4):
+            return meta.get("id")
+    return None
+
+
 def _window(grid: Grid, ci: float, cj: float, wi: float, wj: float) -> tuple[list, list]:
     (xa, ya) = grid.to_volts(ci - wi / 2, cj - wj / 2)
     (xb, yb) = grid.to_volts(ci + wi / 2, cj + wj / 2)
     return sorted([float(xa), float(xb)]), sorted([float(ya), float(yb)])
 
 
+def unchecked_limits_warning(gates: list[str], cfg: DeviceConfig) -> str | None:
+    missing = [g for g in gates if not cfg.has_limits(g)]
+    if not missing:
+        return None
+    return (f"No safe limits are set for {', '.join(missing)} on device '{cfg.name}', so the "
+            "suggested window was not checked against them. Set them on the Device page.")
+
+
 def _clip_to_limits(rng: list, gate: str, cfg: DeviceConfig, warnings: list) -> list:
+    if not cfg.has_limits(gate):
+        return list(rng)
     lo, hi = cfg.limits(gate)
     a, b = rng
     w = b - a
@@ -143,13 +179,18 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
     steps: list[str] = []
     nx_cur, ny_cur = scan.signal.shape[1], scan.signal.shape[0]
 
-    # spacing in volts: measured > device history > configured prior
+    # spacing in volts: measured > device history > configured prior (no voltage scale assumed)
     def plausible(v: float | None, gate: str) -> bool:
-        """Reject spacings far from the configured prior (e.g. from a mis-traced line)."""
-        if v is None or gate not in cfg.addition_voltage:
-            return v is not None
-        r = v / cfg.spacing(gate)
-        return 0.4 <= r <= 2.5
+        """Reject spacings far from what this device has shown before (e.g. a mis-traced line):
+        the configured prior if there is one, else the median of at least two earlier
+        measurements. With neither, any positive spacing is accepted."""
+        if v is None or v <= 0:
+            return False
+        ref = cfg.spacing(gate)
+        if ref is None:
+            hist = history_spacings(history, gate)
+            ref = float(np.median(hist)) if len(hist) >= 2 else None
+        return ref is None or 0.4 <= v / ref <= 2.5
 
     def spacing(fam: str, gate: str, d: float, use_measured: bool = True
                 ) -> tuple[float | None, str]:
@@ -157,13 +198,13 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
         if s_idx and plausible(s_idx * d, gate):
             return s_idx * d, "measured in this scan"
         if s_idx:
-            warnings.append(f"The line spacing measured along {gate} ({s_idx * d * 1e3:.1f} mV) is "
+            warnings.append(f"The line spacing measured along {gate} ({fmt_mag(s_idx * d)}) is "
                             "far from the device's typical value, so it was not used. Check the "
                             "Device page if the typical value is out of date.")
         h = history_spacing(history, gate)
         if h and plausible(h, gate):
             return h, "from earlier scans on this device"
-        if gate in cfg.addition_voltage:
+        if cfg.spacing(gate):
             return cfg.spacing(gate), "device prior"
         return None, "unknown"
 
@@ -191,7 +232,7 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
                                     "x": [ro[xg] - w / 2, ro[xg] + w / 2, n],
                                     "y": [ro[yg] - w / 2, ro[yg] + w / 2, n]}
             steps.append(f"For readout setup, zoom on the (1,1)-(2,0) boundary near {xg} = "
-                         f"{_v(ro[xg])}, {yg} = {_v(ro[yg])} (a {w * 1e3:.0f} mV window).")
+                         f"{_v(ro[xg])}, {yg} = {_v(ro[yg])} (a {fmt_mag(w)} window).")
         for sp in decision.get("spectators", []):
             if sp["status"] != "verified":
                 steps.append(f"Spectator {sp['gate']} is {sp['status']}: this scan cannot show "
@@ -222,11 +263,11 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
                       "a smaller window keeps it on the flank."]
         elif reason == "dots_merged":
             X = cfg.barrier_between(xg, yg)
-            step = cfg.barrier_step
+            step = cfg.barrier_step_for(sa_v or sb_v, x_rng[1] - x_rng[0])
             knob = f"{X}" if X else "the barrier gate between the two dots"
             rec["headline"] = ("The two dots behave like one. Reduce their coupling, then "
                                "rescan the same window.")
-            steps.append(f"Lower {knob} by {step * 1e3:.0f} mV to raise the interdot barrier "
+            steps.append(f"Lower {knob} by {fmt_mag(step)} to raise the interdot barrier "
                          "(for an accumulation-mode exchange gate, lower voltage means weaker "
                          "coupling). Repeat in small steps until separate lines appear.")
             if X:
@@ -282,9 +323,27 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
             return by_k[k0]["c"] - (k0 - 0.5) * s_i, by_k[k0]["m"]
         return None
 
-    def explore_shift(state: str, s_i: float | None) -> tuple[float, float, str]:
+    def explore_shift(state: str, s_i: float | None, lat: dict | None = None
+                      ) -> tuple[float, float, str]:
         """(shift in index units, window width factor, description)."""
+        if state == "anchored" and lat is not None:
+            # counted, but only one transition is visible, so the spacing is unknown (no voltage
+            # scale is assumed): keep that transition inside a wider window, on the correct side
+            k0 = min((l for l in lat["lines"] if l["index"] is not None),
+                     key=lambda l: l["index"])
+            wf = 1.5
+            frac = 0.2 if k0["index"] == 0 else 0.8 if k0["index"] == 1 else 0.95
+            new_w = wf * (S - 1)
+            shift = (k0["c"] - frac * new_w + new_w / 2) - (S - 1) / 2
+            return shift, wf, ("the first transition is known but the electron spacing is not; "
+                               "the next window keeps it in view and is 1.5x wider")
         if state == "lines_unanchored":
+            lowest = min(l["c"] for l in lat["lines"]) if lat and lat["lines"] else None
+            if lowest is not None and lowest > 0.5 * (S - 1):
+                # a large line-free region below the lowest transition is probably the empty
+                # region: keep it in view instead of moving away from it
+                return lowest - 0.35 * (S - 1), 1.0, ("keep the line-free region below the "
+                                                      "lowest transition in view (probably empty)")
             return -explore_frac * (S - 1), 1.0, "toward fewer electrons (no empty region yet)"
         if reason in ("occupancy_too_low", "no_transitions"):
             return explore_frac * (S - 1), 1.0, "toward more electrons (no transition yet)"
@@ -335,18 +394,20 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
             basis = "first anchored transitions and the typical electron spacing"
         wf_a = wf_b = 1.0
     else:
-        confidence, basis = "medium" if (ta or tb) else "low", "exploration"
+        counted = st_a == "anchored" or st_b == "anchored"
+        confidence = "medium" if (ta or tb or counted) else "low"
+        basis = "exploration"
         wf_a = wf_b = 1.0
         if tb:
             j_t = tb[0]
         else:
-            dj, wf_b, why_b = explore_shift(st_b, sb_i)
+            dj, wf_b, why_b = explore_shift(st_b, sb_i, lb if st_b != "no_lines" else None)
             j_t = jc + dj
             notes.append(f"{yg}: {why_b}")
         if ta:
             i_t = ta[0] + ta[1] * (j_t - jc)
         else:
-            di, wf_a, why_a = explore_shift(st_a, sa_i)
+            di, wf_a, why_a = explore_shift(st_a, sa_i, la if st_a != "no_lines" else None)
             i_t = ic + di
             notes.append(f"{xg}: {why_a}")
         if tb and ta is None:
@@ -377,24 +438,36 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
     else:
         wj = cur_wj * wf_b
     x_rng, y_rng = _window(grid, i_t, j_t, wi, wj)
+    # never go round in circles: if this window was already scanned without success, cover
+    # both it and the present window in one larger scan
+    seen = revisited_window(history, xg, yg, x_rng, y_rng)
+    if seen is not None:
+        x_rng = [min(x_rng[0], float(scan.x[0])), max(x_rng[1], float(scan.x[-1]))]
+        y_rng = [min(y_rng[0], float(scan.y[0])), max(y_rng[1], float(scan.y[-1]))]
+        warnings.append(f"The suggested window was already scanned (scan {seen}) without "
+                        "finding (1,1), so the next scan covers both it and this window.")
     cx_old, cy_old = float(np.mean(scan.x[[0, -1]])), float(np.mean(scan.y[[0, -1]]))
     cx_new, cy_new = float(np.mean(x_rng)), float(np.mean(y_rng))
 
-    # split large moves
+    # split large moves: the device's step limit, else one window width per gate
     mx, my = cx_new - cx_old, cy_new - cy_old
-    biggest = max(abs(mx), abs(my))
+    lim_x = cfg.step_limit(float(scan.x[-1] - scan.x[0]))
+    lim_y = cfg.step_limit(float(scan.y[-1] - scan.y[0]))
+    f = min(1.0, lim_x / abs(mx) if mx else 1.0, lim_y / abs(my) if my else 1.0)
     final_target = {xg: cx_new, yg: cy_new}
-    if biggest > cfg.max_step:
-        f = cfg.max_step / biggest
-        warnings.append(f"The full move ({xg} {_mv(mx)}, {yg} {_mv(my)}) exceeds the "
-                        f"{cfg.max_step * 1e3:.0f} mV step limit. Take the first step shown, "
-                        "rescan, and let ChargeCell re-evaluate.")
+    if f < 1.0:
+        limit = (f"the {fmt_mag(cfg.max_step)} step limit" if cfg.max_step else
+                 "one window width (no step limit is set for this device)")
+        warnings.append(f"The full move ({xg} {_mv(mx)}, {yg} {_mv(my)}) exceeds {limit}. "
+                        "Take the first step shown, rescan, and let ChargeCell re-evaluate.")
         mx, my = mx * f, my * f
         hx, hy = (x_rng[1] - x_rng[0]) / 2, (y_rng[1] - y_rng[0]) / 2
         x_rng = [cx_old + mx - hx, cx_old + mx + hx]
         y_rng = [cy_old + my - hy, cy_old + my + hy]
     x_rng = _clip_to_limits(x_rng, xg, cfg, warnings)
     y_rng = _clip_to_limits(y_rng, yg, cfg, warnings)
+    if (w_lim := unchecked_limits_warning([xg, yg], cfg)):
+        warnings.append(w_lim)
     mx = float(np.mean(x_rng)) - cx_old
     my = float(np.mean(y_rng)) - cy_old
     nx = _points(x_rng[1] - x_rng[0], sa_v, cfg, nx_cur)
@@ -404,7 +477,7 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
                basis=basis, target=final_target, move={xg: mx, yg: my},
                next_window={"x_gate": xg, "y_gate": yg, "x": [*x_rng, nx], "y": [*y_rng, ny]})
     verb = lambda d: "raise" if d > 0 else "lower"
-    parts = [f"{verb(d)} {g} by {abs(d) * 1e3:.1f} mV" for g, d in ((xg, mx), (yg, my))
+    parts = [f"{verb(d)} {g} by {fmt_mag(d)}" for g, d in ((xg, mx), (yg, my))
              if abs(d) >= 0.5 * min(dxv, dyv)]
     action = " and ".join(parts) if parts else "keep the centre"
     rec["headline"] = ({"high": "(1,1) is outside this window. ",
@@ -413,8 +486,9 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
                        + ({"high": f"To centre it, {action}.",
                            "medium": f"reachable if you {action}.",
                            "low": f"Explore: {action}."}[confidence]))
-    steps.append(f"Next scan: {xg} {x_rng[0]:.4f} to {x_rng[1]:.4f} V ({nx} points), "
-                 f"{yg} {y_rng[0]:.4f} to {y_rng[1]:.4f} V ({ny} points).")
+    sx, sy = x_rng[1] - x_rng[0], y_rng[1] - y_rng[0]
+    steps.append(f"Next scan: {xg} {fmt_v(x_rng[0], sx)} to {fmt_v(x_rng[1], sx)} ({nx} points), "
+                 f"{yg} {fmt_v(y_rng[0], sy)} to {fmt_v(y_rng[1], sy)} ({ny} points).")
     if notes:
         steps.append("Why: " + "; ".join(notes) + ".")
     if reason == "no_transitions":

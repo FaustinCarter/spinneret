@@ -44,10 +44,11 @@ def trace(a):
     ws = make_ws(a)
     rng = np.random.default_rng(a.seed)
     for k in range(a.devices):
-        vd = virtual.create(ws, seed=int(rng.integers(1, 2**31)))
-        vs, w = vd["voltage_state"], 0.09
+        vd = virtual.create(ws, seed=int(rng.integers(1, 2**31)), prior=not a.no_prior,
+                            limits=not a.no_prior)
         p = DeviceParams.from_dict(vd["params"])
-        win = (("P1", (vs["P1"] - w / 2, vs["P1"] + w / 2, 90)), ("P2", (vs["P2"] - w / 2, vs["P2"] + w / 2, 90)))
+        wx, wy = virtual.start_window(vd)
+        win = (("P1", wx), ("P2", wy))
         print(f"== device {k} v11(mV)={np.round(p.v11, 1)} addition(mV)="
               f"{[round(p.addition_voltage(i), 1) for i in range(3)]}")
         for step in range(a.max_scans):
@@ -74,7 +75,8 @@ def bench(a):
     tot = dict(n=0, found=0, correct=0, scans=[])
     for seed in (1, 2, 4):
         ws = make_ws(a)
-        r = virtual.evaluate_navigation(ws, n_devices=10, max_scans=a.max_scans, seed=seed)
+        r = virtual.evaluate_navigation(ws, n_devices=10, max_scans=a.max_scans, seed=seed,
+                                        prior=not a.no_prior, limits=not a.no_prior)
         tot["n"] += r["n"]; tot["found"] += r["found"]; tot["correct"] += r["correct"]
         tot["scans"] += [x["scans"] for x in r["results"] if x["scans"]]
     print(f"devices {tot['n']}, found {tot['found']}, correct {tot['correct']}, "
@@ -89,6 +91,8 @@ if __name__ == "__main__":
     ap.add_argument("--devices", type=int, default=6)
     ap.add_argument("--max-scans", type=int, default=8)
     ap.add_argument("--bench", action="store_true")
+    ap.add_argument("--no-prior", action="store_true",
+                    help="practice devices without a typical spacing or safe limits")
     args = ap.parse_args()
     if not args.oracle and not args.model_dir:
         ap.error("give --oracle or --model-dir")

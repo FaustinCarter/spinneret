@@ -79,6 +79,21 @@ class DeviceParams:
         return cls(**kw)
 
 
+def scale_voltages(p: DeviceParams, f: float) -> DeviceParams:
+    """The same device with every gate voltage scale multiplied by ``f`` (energies unchanged).
+
+    Voltages vary widely between devices and technologies; practice devices use this so that
+    nothing downstream can quietly depend on one voltage scale."""
+    d = p.to_dict()
+    q = DeviceParams.from_dict(d)
+    q.lever = p.lever / f
+    q.s_lever = p.s_lever / f
+    q.v11 = p.v11 * f
+    q.v_ref = p.v_ref * f
+    q.offset = centre_offsets(q.lever, q.U, q.Um, q.v11)
+    return q
+
+
 def centre_offsets(lever: np.ndarray, U: np.ndarray, Um: np.ndarray, v11: np.ndarray) -> np.ndarray:
     """Offsets that put the centre of the (1,1,1) cell at plunger voltages ``v11``."""
     eps_star = -U / 2.0 - Um.sum(axis=1)  # each neighbour holds one electron

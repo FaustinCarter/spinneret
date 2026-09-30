@@ -1123,35 +1123,45 @@ pages.device = {
     if (isNew) this.select.append(h("option", { value: name, selected: true }, name));
     this.select.value = name;
     const d = JSON.parse(JSON.stringify(base));
-    const gates = [...new Set([...d.plungers, ...Object.keys(d.safe_limits)])];
+    const gates = [...new Set([...d.plungers, ...Object.values(d.barriers || {}), ...Object.values(d.tunnel_gates || {}), ...Object.keys(d.safe_limits)])];
     const inp = (v, attrs = {}) => h("input", { value: v ?? "", ...attrs });
     const f = {
       description: inp(d.description), carrier: h("select", {}, h("option", { value: "electron", selected: d.carrier === "electron" }, "Electrons"),
         h("option", { value: "hole", selected: d.carrier === "hole" }, "Holes")),
       plungers: inp(d.plungers.join(", ")), sensor_gate: inp(d.sensor_gate),
       barriers: inp(Object.entries(d.barriers).map(([k, v]) => `${k}=${v}`).join(", ")),
-      max_step: inp(d.max_step * 1e3, { type: "number", step: 1 }), barrier_step: inp(d.barrier_step * 1e3, { type: "number", step: 1 }),
+      tunnel_gates: inp(Object.entries(d.tunnel_gates || {}).map(([k, v]) => `${k}=${v}`).join(", ")),
+      max_step: inp(d.max_step != null ? d.max_step * 1e3 : "", { type: "number", step: "any", placeholder: "auto: one window" }),
+      barrier_step: inp(d.barrier_step != null ? d.barrier_step * 1e3 : "", { type: "number", step: "any", placeholder: "auto" }),
+      electron_temperature: inp(d.electron_temperature != null ? d.electron_temperature * 1e3 : "", { type: "number", step: "any", placeholder: "optional" }),
+      tiebar_target: inp(d.tiebar_coupling_target ? d.tiebar_coupling_target.join(", ") : "", { placeholder: "optional, e.g. 0.05, 0.3" }),
       points_per_addition: inp(d.points_per_addition, { type: "number" }), min_points: inp(d.min_points, { type: "number" }), max_points: inp(d.max_points, { type: "number" }),
       virtual: h("textarea", { rows: 5, placeholder: '{"virtual": ["vP1","vP2"], "physical": ["P1","P2","M1"], "matrix": [[1,0.2],[0.15,1],[-0.3,-0.2]]}' },
         d.virtual_gates ? JSON.stringify(d.virtual_gates) : ""),
       notes: h("textarea", { rows: 2 }, d.notes || ""),
     };
-    const rows = gates.map(g => ({ g, lo: inp(d.safe_limits[g]?.[0] ?? "", { type: "number", step: 0.01 }), hi: inp(d.safe_limits[g]?.[1] ?? "", { type: "number", step: 0.01 }),
-      add: inp(d.addition_voltage[g] != null ? d.addition_voltage[g] * 1e3 : "", { type: "number", step: 0.5 }) }));
+    const rows = gates.map(g => ({ g, lo: inp(d.safe_limits[g]?.[0] ?? "", { type: "number", step: "any" }), hi: inp(d.safe_limits[g]?.[1] ?? "", { type: "number", step: "any" }),
+      add: inp(d.addition_voltage[g] != null ? d.addition_voltage[g] * 1e3 : "", { type: "number", step: "any" }),
+      lever: inp((d.lever_arm || {})[g] ?? "", { type: "number", step: "any" }) }));
+    const pairs = txt => { const o = {}; txt.split(",").map(t => t.trim()).filter(Boolean).forEach(t => { const [k, v] = t.split("="); if (k && v) o[k.trim()] = v.trim(); }); return o; };
+    const num = el => el.value === "" ? null : +el.value;
     const L = (t, el, help) => h("label", { title: help || null }, t, el);
     this.form.replaceChildren(
       h("div", { class: "panel stack" }, h("h2", { style: "margin:0" }, name),
-        h("p", { class: "small muted", style: "margin:0" }, "These settings make the guidance safer and more specific. Every recommended scan stays inside the safe limits, and moves larger than the step limit are split."),
+        h("p", { class: "small muted", style: "margin:0" }, "All settings are optional; ChargeCell assumes no voltage scale. Unset values are measured from your scans or taken as a fraction of the current window. Recommended scans stay inside the safe limits you set, and moves larger than the step limit are split."),
         h("div", { class: "fields" }, L("Description", f.description), L("Carriers", f.carrier, "Electrons: more plunger voltage adds electrons. Holes: less voltage adds holes."),
-          L("Plunger gates", f.plungers, "Comma separated, e.g. P1, P2, P3"), L("Sensor gate", f.sensor_gate), L("Barrier gates", f.barriers, "Which gate sits between each pair, e.g. P1-P2=X1, P2-P3=X2"),
-          L("Max move (mV)", f.max_step, "Largest single DC step ChargeCell will suggest; bigger moves are split"),
-          L("Barrier step (mV)", f.barrier_step, "How far to lower a barrier when two dots look merged"),
+          L("Plunger gates", f.plungers, "Comma separated, e.g. P1, P2, P3"), L("Sensor gate", f.sensor_gate), L("Exchange gates", f.barriers, "Which gate sits between each pair, e.g. P1-P2=X1, P2-P3=X2"),
+          L("Tunnel gates", f.tunnel_gates, "Reservoir tunnel gate next to each edge plunger, e.g. P1=T1, P3=T2"),
+          L("Max move (mV)", f.max_step, "Largest single DC step ChargeCell will suggest; bigger moves are split. Blank: at most one window width"),
+          L("Exchange-gate step (mV)", f.barrier_step, "How far to change an exchange gate for merged dots or tie-bar coupling. Blank: a quarter of the electron spacing"),
+          L("Electron temperature (mK)", f.electron_temperature, "Optional. With lever arms, tie-bar results are also given in µeV"),
+          L("Tie-bar coupling target", f.tiebar_target, "Optional band for the tie-bar coupling ratio (interdot width / tie-bar length), e.g. 0.05, 0.3"),
           L("Points per electron", f.points_per_addition, "Resolution target for suggested scans"), L("Min points per axis", f.min_points), L("Max points per axis", f.max_points)),
-        h("p", { class: "small muted", style: "margin:0" }, "Plunger gates and barriers are comma separated (P1, P2, P3 and P1-P2=X1, P2-P3=X2). Hover over a field for help.")),
+        h("p", { class: "small muted", style: "margin:0" }, "Gate names follow the HRL convention: P plungers, X exchange gates, T reservoir tunnel gates, M sensor. Hover over a field for help.")),
       h("div", { class: "panel" }, h("h2", {}, "Gates"),
-        h("table", { class: "list" }, h("tr", {}, h("th", {}, "Gate"), h("th", {}, "Safe minimum (V)"), h("th", {}, "Safe maximum (V)"), h("th", {}, "Typical spacing between electrons (mV)")),
-          rows.map(r => h("tr", {}, h("td", {}, h("b", {}, r.g)), h("td", {}, r.lo), h("td", {}, r.hi), h("td", {}, r.add)))),
-        h("p", { class: "small muted" }, "The spacing is a starting guess; once scans are analysed, measured spacings on this device take over.")),
+        h("table", { class: "list" }, h("tr", {}, h("th", {}, "Gate"), h("th", {}, "Safe minimum (V)"), h("th", {}, "Safe maximum (V)"), h("th", {}, "Typical spacing between electrons (mV)"), h("th", {}, "Lever arm (eV/V)")),
+          rows.map(r => h("tr", {}, h("td", {}, h("b", {}, r.g)), h("td", {}, r.lo), h("td", {}, r.hi), h("td", {}, r.add), h("td", {}, r.lever)))),
+        h("p", { class: "small muted" }, "All optional. The spacing is a starting guess; once scans are analysed, measured spacings on this device take over. Lever arms are only used to express tie-bar results in energy units.")),
       h("details", { class: "panel" }, h("summary", {}, "Virtual gates (advanced)"),
         h("p", { class: "small muted" }, "If you scan in virtual plunger coordinates, give the matrix that turns virtual changes into physical gate changes. Guidance will then list the physical moves too."),
         f.virtual),
@@ -1160,13 +1170,15 @@ pages.device = {
         let vg = null;
         if (f.virtual.value.trim()) { try { vg = JSON.parse(f.virtual.value); } catch (e) { toast("The virtual gate matrix is not valid JSON.", "error"); return; } }
         const plungers = f.plungers.value.split(",").map(s => s.trim()).filter(Boolean);
-        const safe = {}, add = {};
-        rows.forEach(r => { if (r.lo.value !== "" && r.hi.value !== "") safe[r.g] = [+r.lo.value, +r.hi.value]; if (r.add.value !== "") add[r.g] = +r.add.value / 1e3; });
-        const barriers = {};
-        f.barriers.value.split(",").map(s => s.trim()).filter(Boolean).forEach(s => { const [k, v] = s.split("="); if (k && v) barriers[k.trim()] = v.trim(); });
+        const safe = {}, add = {}, lever = {};
+        rows.forEach(r => { if (r.lo.value !== "" && r.hi.value !== "") safe[r.g] = [+r.lo.value, +r.hi.value]; if (r.add.value !== "") add[r.g] = +r.add.value / 1e3; if (r.lever.value !== "") lever[r.g] = +r.lever.value; });
+        const ms = num(f.max_step), bs = num(f.barrier_step), te = num(f.electron_temperature);
+        const tt = f.tiebar_target.value.split(",").map(t => t.trim()).filter(Boolean).map(Number);
         await api(`/api/devices/${encodeURIComponent(name)}`, { method: "PUT", json: {
-          ...d, description: f.description.value, carrier: f.carrier.value, plungers, sensor_gate: f.sensor_gate.value, barriers,
-          max_step: +f.max_step.value / 1e3, barrier_step: +f.barrier_step.value / 1e3, points_per_addition: +f.points_per_addition.value,
+          ...d, description: f.description.value, carrier: f.carrier.value, plungers, sensor_gate: f.sensor_gate.value,
+          barriers: pairs(f.barriers.value), tunnel_gates: pairs(f.tunnel_gates.value),
+          max_step: ms ? ms / 1e3 : null, barrier_step: bs ? bs / 1e3 : null, electron_temperature: te ? te / 1e3 : null,
+          tiebar_coupling_target: tt.length === 2 ? tt : null, lever_arm: lever, points_per_addition: +f.points_per_addition.value,
           min_points: +f.min_points.value, max_points: +f.max_points.value, safe_limits: safe, addition_voltage: add, virtual_gates: vg, notes: f.notes.value } });
         toast("Device settings saved");
         this.enter();

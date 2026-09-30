@@ -88,8 +88,6 @@ def test_training_smoke(ws):
     assert card["metrics"]["synthetic"]["n"] > 0 and 0 < card["found_threshold"] <= 1
     Analyzer._cache.clear()
     vd = virtual.create(ws, seed=5)
-    vs = vd["voltage_state"]
-    scan = virtual.measure(ws, vd["id"], "P1", "P2", (vs["P1"] - 0.04, vs["P1"] + 0.04, 64),
-                           (vs["P2"] - 0.04, vs["P2"] + 0.04, 64))
+    scan = virtual.measure(ws, vd["id"], "P1", "P2", *virtual.start_window(vd, points=64))
     res = analyze(ws, scan)
     assert res["model_id"] == mid and res["recommendation"]

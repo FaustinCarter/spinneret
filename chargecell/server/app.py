@@ -354,10 +354,8 @@ def create_app(workspace: str | Path) -> FastAPI:
     @app.post("/api/virtual")
     def new_virtual(body: dict = Body(default={})):
         vd = virtual.create(ws, body.get("seed"), body.get("preset", "hrl_linear"))
-        vs = vd["voltage_state"]
-        w = 0.09
-        scan = virtual.measure(ws, vd["id"], "P1", "P2", (vs["P1"] - w / 2, vs["P1"] + w / 2, 90),
-                               (vs["P2"] - w / 2, vs["P2"] + w / 2, 90))
+        wx, wy = virtual.start_window(vd)
+        scan = virtual.measure(ws, vd["id"], "P1", "P2", wx, wy)
         ws.save_scan(scan)
         return {"virtual_device": vd["id"], "device": vd["device"], "scan_id": scan.id}
 

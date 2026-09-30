@@ -18,13 +18,16 @@ def _scan_from_sample(s, device="sim"):
 
 
 def test_decisions_and_targets_with_perfect_perception(ws, oracle_analyzer):
-    ws.save_device(DeviceConfig(name="sim", safe_limits={}, max_step=10.0))
     rng = np.random.default_rng(5)
     agree, n, anchored_err, direction_ok, direction_n = 0, 0, [], 0, 0
     for _ in range(60):
         s = generate_sample(rng)
         t = s["truth"]
         scan = _scan_from_sample(s)
+        # an operator's rough prior for this device (+-30%), as for a new device of a known type
+        prior = {g: s["params"].addition_voltage(k) / 1e3 * rng.uniform(0.7, 1.3)
+                 for k, g in enumerate(["P1", "P2", "P3"])}
+        ws.save_device(DeviceConfig(name="sim", max_step=10.0, addition_voltage=prior))
         oracle_analyzer.register(scan.id, truth_to_prediction(s["render"], t, s["window"]))
         res = analyze(ws, scan)
         n += 1
@@ -77,13 +80,14 @@ def test_navigation_reaches_11_with_perfect_perception(ws, oracle_analyzer):
 def test_inconsistent_anchored_lines_lower_confidence(ws, oracle_analyzer):
     """A noisy occupancy map can stack several indexed lines within a few pixels (seen with an
     undertrained model). The guidance must not call that a high-confidence lattice."""
-    ws.save_device(DeviceConfig(name="sim", safe_limits={}, max_step=10.0))
     rng = np.random.default_rng(21)
     for _ in range(300):
         s = generate_sample(rng, mix=(0, 1, 0))
         t = s["truth"]
         if not (t["status"] == schema.NOT_IN_WINDOW and t["ref_a"] and t["ref_b"]):
             continue
+        prior = {g: s["params"].addition_voltage(k) / 1e3 for k, g in enumerate(["P1", "P2", "P3"])}
+        ws.save_device(DeviceConfig(name="sim", max_step=10.0, addition_voltage=prior))
         scan = _scan_from_sample(s)
         pred = truth_to_prediction(s["render"], t, s["window"])
         oracle_analyzer.register(scan.id, pred)
@@ -112,3 +116,12 @@ def test_inconsistent_anchored_lines_lower_confidence(ws, oracle_analyzer):
     # the target still sits about one cell spacing from the first transition, not 1 px
     sa = rec["spacing_v"][scan2.x_gate]
     assert abs(rec["target"][scan2.x_gate] - base["target"][scan2.x_gate]) < 0.5 * sa
+
+
+def test_navigation_without_any_voltage_prior(ws, oracle_analyzer):
+    """No typical spacing, no safe limits, no step limit, random voltage scales: guidance must
+    work from what the scans show (ChargeCell assumes no voltage scale)."""
+    r = virtual.evaluate_navigation(ws, n_devices=6, max_scans=10, seed=8, prior=False,
+                                    limits=False)
+    assert r["found"] >= 5, r
+    assert r["correct"] == r["found"], "every FOUND must agree with the ground truth"

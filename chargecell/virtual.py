@@ -15,16 +15,21 @@ from . import schema
 from .config import DeviceConfig
 from .schema import Scan
 from .simulate.generator import Window, oracle, render, sample_artifacts, sample_device
-from .simulate.physics import DeviceParams
+from .simulate.physics import DeviceParams, scale_voltages
 from .storage import Workspace
 
 GATES = ["P1", "P2", "P3"]
 
 
-def create(ws: Workspace, seed: int | None = None, preset: str = "hrl_linear") -> dict:
+def create(ws: Workspace, seed: int | None = None, preset: str = "hrl_linear",
+           prior: bool = True, limits: bool = True) -> dict:
+    """A new practice device. Its overall voltage scale is random (addition voltages from a few
+    mV to a few hundred mV), like real devices of different technologies. ``prior`` gives the
+    operator a rough (+-30%) typical spacing; ``limits`` sets safe limits on the plungers."""
     seed = int(np.random.SeedSequence().entropy % 2**31) if seed is None else int(seed)
     rng = np.random.default_rng(seed)
     p = sample_device(rng, preset)
+    p = scale_voltages(p, float(np.exp(rng.uniform(np.log(0.25), np.log(4.0)))))
     start = {g: float((p.v11[k] + rng.uniform(-2.5, 3.0) * p.addition_voltage(k)) / 1e3)
              for k, g in enumerate(GATES)}
     start["P3"] = float(p.v11[2] / 1e3)
@@ -34,12 +39,28 @@ def create(ws: Workspace, seed: int | None = None, preset: str = "hrl_linear") -
               voltage_state=start, created=schema.now_iso(), measurements=0)
     ws.save_virtual_device(vd_id, vd)
     # the operator only gets a rough prior (+-30%), as with a new real device
-    prior = {g: round(p.addition_voltage(k) / 1e3 * rng.uniform(0.7, 1.3), 4)
-             for k, g in enumerate(GATES)}
+    typical = {g: float(p.addition_voltage(k) / 1e3 * rng.uniform(0.7, 1.3))
+               for k, g in enumerate(GATES)}
+    vd["typical_spacing"] = typical
+    ws.save_virtual_device(vd_id, vd)
+    safe = {g: [float((p.v11[k] - 15 * p.addition_voltage(k)) / 1e3),
+                float((p.v11[k] + 15 * p.addition_voltage(k)) / 1e3)] for k, g in enumerate(GATES)}
     ws.save_device(DeviceConfig(name=name, description="Simulated practice device",
-                                safe_limits={g: [0.3, 1.4] for g in GATES},
-                                addition_voltage=prior, notes="Created by ChargeCell"))
+                                safe_limits=safe if limits else {},
+                                addition_voltage=typical if prior else {},
+                                notes="Created by ChargeCell"))
     return vd
+
+
+def start_window(vd: dict, gates=("P1", "P2"), points: int = 90) -> tuple:
+    """The first window an operator would take: about three typical spacings around the
+    present voltages."""
+    vs = vd["voltage_state"]
+    out = []
+    for g in gates:
+        w = 3.0 * vd["typical_spacing"][g]
+        out.append((vs[g] - w / 2, vs[g] + w / 2, points))
+    return tuple(out)
 
 
 def measure(ws: Workspace, vd_id: str, x_gate: str, y_gate: str, x: tuple, y: tuple,
@@ -91,18 +112,17 @@ def _found_is_right(vd: dict, scan: Scan, res: dict) -> bool:
 
 
 def evaluate_navigation(ws: Workspace, n_devices: int = 10, max_scans: int = 8,
-                        model_id: str | None = None, seed: int = 0) -> dict:
+                        model_id: str | None = None, seed: int = 0, prior: bool = True,
+                        limits: bool = True) -> dict:
     """Follow ChargeCell's guidance on fresh virtual devices; report scans needed to find (1,1)."""
     from .analysis.decide import analyze
 
     rng = np.random.default_rng(seed)
     results = []
     for k in range(n_devices):
-        vd = create(ws, seed=int(rng.integers(1, 2**31)))
-        vs = vd["voltage_state"]
-        w = 0.09
-        win = (("P1", (vs["P1"] - w / 2, vs["P1"] + w / 2, 90)),
-               ("P2", (vs["P2"] - w / 2, vs["P2"] + w / 2, 90)))
+        vd = create(ws, seed=int(rng.integers(1, 2**31)), prior=prior, limits=limits)
+        wx, wy = start_window(vd)
+        win = (("P1", wx), ("P2", wy))
         found_at, correct = None, None
         trail = []
         for step in range(1, max_scans + 1):

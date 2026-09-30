@@ -232,7 +232,10 @@ class ScanStep(_Strict):
         default_factory=dict, description="changes to apply to other gates before scanning, V")
     physical_moves: Optional[dict[str, float]] = Field(
         None, description="the move in physical gates, if the scan was in virtual gates")
-    max_step: float = Field(description="ramp DC voltages in steps no larger than this, V")
+    max_step: Optional[float] = Field(
+        None, description="the device's step limit, V: ramp DC voltages in steps no larger than "
+                          "this. null: no limit is configured, and moves were limited to one "
+                          "window width")
     confidence: Literal["high", "medium", "low"]
     basis: str = ""
 
