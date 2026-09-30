@@ -17,9 +17,10 @@ workspace/
 gui_shots/
 *.nc
 
-# Model weights: only the bundled starter model is tracked
+# Model weights: only the bundled starter models and the candidates are tracked
 *.pt
 !chargecell/assets/models/**/*.pt
+!models/candidates/**/*.pt
 
 # OS / editors
 .DS_Store
