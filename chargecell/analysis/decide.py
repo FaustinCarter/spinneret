@@ -226,7 +226,7 @@ def analyze(ws: Workspace, scan: Scan, model_id: str | None = None,
                                                 scan.x_gate, scan.y_gate)
     decision = dict(status=status, reason=reason, ref=[ref_a, ref_b],
                     cell=({k: v for k, v in cell.items() if k != "mask"} if cell else None),
-                    keypoints=keypoints)
+                    keypoints=keypoints, held_back=demoted)
     decision["spectators"] = spectator_check(scan, cfg, history)
     rec = recommend(scan, grid, cfg, decision, lattice, history, q)
 

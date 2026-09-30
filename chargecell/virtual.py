@@ -110,20 +110,43 @@ def average_longer(ws: Workspace, vd_id: str, factor: float = 4.0) -> None:
     ws.save_virtual_device(vd_id, vd)
 
 
-def follow_fix(ws: Workspace, vd_id: str, analysis: dict, window: dict | None) -> None:
+def follow_fix(ws: Workspace, vd_id: str, analysis: dict, window: dict | None) -> list[str]:
     """Apply the fix an UNINTERPRETABLE verdict asks for, as an operator would: retune the
-    sensor (at the window about to be scanned) and, for noise, average longer."""
+    sensor (at the window about to be scanned) and, for noise, average longer. Returns what
+    was done, in words."""
     if analysis.get("status") != schema.UNINTERPRETABLE:
-        return
+        return []
     reason = analysis.get("reason")
+    done = []
     if reason in ("sensor_insensitive", "low_snr"):
         at = {}
         if window:
             at = {window["x_gate"]: (window["x"][0] + window["x"][1]) / 2,
                   window["y_gate"]: (window["y"][0] + window["y"][1]) / 2}
-        retune_sensor(ws, vd_id, {g: v for g, v in at.items() if g in GATES})
+        at = {g: v for g, v in at.items() if g in GATES}
+        retune_sensor(ws, vd_id, at)
+        done.append("Retuned the sensor to the steepest flank of its peak" +
+                    (" at the centre of the next window" if at else ""))
     if reason == "low_snr":
         average_longer(ws, vd_id)
+        done.append("Averaged 4x longer")
+    return done
+
+
+def apply_advice(ws: Workspace, vd_id: str, analysis: dict, window: dict) -> list[tuple]:
+    """Do what the advice says before the next scan, as an operator would: change the gates it
+    asks for (e.g. an exchange gate) and apply the fix for an unreadable scan. Returns the
+    actions as (text, gate_changes) for the automation tree."""
+    rec = analysis.get("recommendation") or {}
+    vd = ws.load_virtual_device(vd_id)
+    changes = {}
+    for g, d in (rec.get("move") or {}).items():
+        if g in vd["voltage_state"] and g not in (window["x_gate"], window["y_gate"]):
+            vd["voltage_state"][g] += d
+            changes[g] = float(d)
+    ws.save_virtual_device(vd_id, vd)
+    actions = [("Set the gates as advised", changes)] if changes else []
+    return actions + [(text, {}) for text in follow_fix(ws, vd_id, analysis, window)]
 
 
 def start_window(vd: dict, gates=("P1", "P2"), points: int = 90) -> tuple:
@@ -300,6 +323,19 @@ def pvt_found_is_right(vd: dict, scan: Scan, res: dict) -> bool:
     return bool(l0 < Pv < l1)
 
 
+def found_is_right(ws: Workspace, scan: Scan, res: dict) -> bool | None:
+    """Is a FOUND on a practice-device scan right? None if the scan is not from one."""
+    vd = ws.load_virtual_device(scan.extra.get("virtual_device") or "")
+    if vd is None or "truth" not in scan.extra:
+        return None
+    kind = res.get("kind") or scan.kind
+    if kind == "PvT":
+        return pvt_found_is_right(vd, scan, res)
+    if kind == "tiebar":
+        return tiebar_found_is_right(scan, res)
+    return _found_is_right(vd, scan, res)
+
+
 def tiebar_found_is_right(scan: Scan, res: dict) -> bool:
     """Right if both reported triple points lie within 0.3 tie-bar lengths of the true ones."""
     t, kp = scan.extra["truth"], res.get("keypoints") or {}
@@ -326,10 +362,12 @@ def evaluate_navigation(ws: Workspace, n_devices: int = 10, max_scans: int = 8,
 
 def evaluate(ws: Workspace, kind: str = "PvP", n_devices: int = 10, max_scans: int = 8,
              model_id: str | None = None, seed: int = 0, prior: bool = True,
-             limits: bool = True) -> dict:
+             limits: bool = True, record: bool = True) -> dict:
     """Closed loop for one scan kind: PvP (find (1,1) of P1-P2), PvT (load one electron under P1
     with T1, starting with T1 too closed half the time) or tiebar (zoom on the (1,1)-(2,0)
-    transition of P1-P2, starting near it as after a PvP scan)."""
+    transition of P1-P2, starting near it as after a PvP scan). Each device's loop is recorded
+    as a run in the automation tree (``record``)."""
+    from . import runs
     from .analysis.decide import analyze
 
     rng = np.random.default_rng(seed)
@@ -346,33 +384,33 @@ def evaluate(ws: Workspace, kind: str = "PvP", n_devices: int = 10, max_scans: i
             wx, wy = start_window(vd)
             win = (("P1", wx), ("P2", wy))
         found_at, correct, trail = None, None, []
+        run = runs.new_run(ws, vd["device"], title=f"Closed loop ({kind}) on {vd['device']}",
+                           source="practice") if record else None
         for step in range(1, max_scans + 1):
             scan = measure(ws, vd["id"], win[0][0], win[1][0], win[0][1], win[1][1], kind=kind)
             ws.save_scan(scan)
             res = analyze(ws, scan, model_id)
             ws.save_analysis(scan.id, res)
+            if run:
+                runs.record(ws, scan, res, run_id=run["id"])
             trail.append(dict(status=res["status"], reason=res["reason"],
                               truth=scan.extra["truth"]["status"],
                               truth_reason=scan.extra["truth"]["reason"]))
             if res["status"] == schema.FOUND:
                 found_at = step
-                vd = ws.load_virtual_device(vd["id"])
-                correct = (pvt_found_is_right(vd, scan, res) if kind == "PvT" else
-                           tiebar_found_is_right(scan, res) if kind == "tiebar" else
-                           _found_is_right(vd, scan, res))
+                correct = found_is_right(ws, scan, res)
                 break
-            rec = res.get("recommendation") or {}
-            nw = rec.get("next_window")
+            nw = (res.get("recommendation") or {}).get("next_window")
             if not nw:
                 break
-            vd = ws.load_virtual_device(vd["id"])
-            for g, dv in (rec.get("move") or {}).items():     # e.g. an exchange-gate change
-                if g not in (nw["x_gate"], nw["y_gate"]) and g in vd["voltage_state"]:
-                    vd["voltage_state"][g] += dv
-            ws.save_virtual_device(vd["id"], vd)
-            follow_fix(ws, vd["id"], res, nw)                  # e.g. retune the sensor
+            for text, changes in apply_advice(ws, vd["id"], res, nw):  # e.g. retune the sensor
+                if run:
+                    runs.add_action(ws, run["id"], text, changes, by="practice operator")
             win = ((nw["x_gate"], tuple(nw["x"])), (nw["y_gate"], tuple(nw["y"])))
-        results.append(dict(device=vd["id"], scans=found_at, correct=correct, trail=trail))
+        if run:
+            runs.close(ws, run["id"], "done" if found_at else "stopped")
+        results.append(dict(device=vd["id"], scans=found_at, correct=correct, trail=trail,
+                            run_id=run["id"] if run else None))
     found = [r for r in results if r["scans"]]
     return dict(kind=kind, n=n_devices, found=len(found),
                 correct=sum(1 for r in found if r["correct"]),

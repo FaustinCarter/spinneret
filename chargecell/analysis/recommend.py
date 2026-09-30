@@ -135,6 +135,21 @@ def revisited_window(history: list[tuple[dict, dict]], x_gate: str, y_gate: str,
     return None
 
 
+def same_as_scan(scan: Scan, x_rng: list, y_rng: list, tol: float = 0.1) -> bool:
+    """Is the window (nearly) the scan's own window? Rescanning it cannot add information
+    (noise and sensor problems are handled as UNINTERPRETABLE)."""
+    sx, sy = float(scan.x[-1] - scan.x[0]), float(scan.y[-1] - scan.y[0])
+    return (abs(x_rng[0] - scan.x[0]) < tol * sx and abs(x_rng[1] - scan.x[-1]) < tol * sx
+            and abs(y_rng[0] - scan.y[0]) < tol * sy and abs(y_rng[1] - scan.y[-1]) < tol * sy)
+
+
+def widened(x_rng: list, y_rng: list, f: float = 1.5) -> tuple[list, list]:
+    """The window scaled by ``f`` about its centre."""
+    cx, cy = float(np.mean(x_rng)), float(np.mean(y_rng))
+    hx, hy = f * (x_rng[1] - x_rng[0]) / 2, f * (y_rng[1] - y_rng[0]) / 2
+    return [cx - hx, cx + hx], [cy - hy, cy + hy]
+
+
 def _window(grid: Grid, ci: float, cj: float, wi: float, wj: float) -> tuple[list, list]:
     (xa, ya) = grid.to_volts(ci - wi / 2, cj - wj / 2)
     (xb, yb) = grid.to_volts(ci + wi / 2, cj + wj / 2)
@@ -283,8 +298,12 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
         elif reason == "resolution_too_coarse":
             s_x = sa_v or cfg.spacing(xg)
             s_y = sb_v or cfg.spacing(yg)
-            nx = _points(x_rng[1] - x_rng[0], s_x, cfg, 2 * nx_cur)
-            ny = _points(y_rng[1] - y_rng[0], s_y, cfg, 2 * ny_cur)
+            # at least twice the present points: a spacing estimate that is too large must
+            # never turn "more points" into fewer
+            nx = max(_points(x_rng[1] - x_rng[0], s_x, cfg, 2 * nx_cur),
+                     min(cfg.max_points, 2 * nx_cur))
+            ny = max(_points(y_rng[1] - y_rng[0], s_y, cfg, 2 * ny_cur),
+                     min(cfg.max_points, 2 * ny_cur))
             rec["headline"] = (f"Too few points to resolve the cells. Rescan with {nx} x {ny} "
                                "points.")
             steps.append(f"Aim for about {cfg.points_per_addition} points per electron "
@@ -471,6 +490,13 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
         y_rng = [min(y_rng[0], float(scan.y[0])), max(y_rng[1], float(scan.y[-1]))]
         warnings.append(f"The suggested window was already scanned (scan {seen}) without "
                         "finding (1,1), so the next scan covers both it and this window.")
+    wider = same_as_scan(scan, x_rng, y_rng)
+    if wider:
+        # the same window again would show the same thing: zoom out around the expected cell
+        # so more of the empty region and the neighbouring cells are in view
+        x_rng, y_rng = widened(x_rng, y_rng, 1.5)
+        warnings.append("Rescanning this window would show the same thing, so the next window "
+                        "is 1.5x wider around the expected (1,1) cell.")
     cx_old, cy_old = float(np.mean(scan.x[[0, -1]])), float(np.mean(scan.y[[0, -1]]))
     cx_new, cy_new = float(np.mean(x_rng)), float(np.mean(y_rng))
 
@@ -495,8 +521,11 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
         warnings.append(w_lim)
     mx = float(np.mean(x_rng)) - cx_old
     my = float(np.mean(y_rng)) - cy_old
-    nx = _points(x_rng[1] - x_rng[0], sa_v, cfg, nx_cur)
-    ny = _points(y_rng[1] - y_rng[0], sb_v, cfg, ny_cur)
+    # without a spacing, keep the present point pitch
+    nx = _points(x_rng[1] - x_rng[0], sa_v, cfg,
+                 round(nx_cur * (x_rng[1] - x_rng[0]) / float(scan.x[-1] - scan.x[0])))
+    ny = _points(y_rng[1] - y_rng[0], sb_v, cfg,
+                 round(ny_cur * (y_rng[1] - y_rng[0]) / float(scan.y[-1] - scan.y[0])))
 
     rec.update(kind="move" if confidence != "low" else "explore", confidence=confidence,
                basis=basis, target=final_target, move={xg: mx, yg: my},
@@ -505,12 +534,23 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
     parts = [f"{verb(d)} {g} by {fmt_mag(d)}" for g, d in ((xg, mx), (yg, my))
              if abs(d) >= 0.5 * min(dxv, dyv)]
     action = " and ".join(parts) if parts else "keep the centre"
-    rec["headline"] = ({"high": "(1,1) is outside this window. ",
-                        "medium": "(1,1) is probably ",
-                        "low": "Not enough in view to locate (1,1). "}[confidence]
-                       + ({"high": f"To centre it, {action}.",
-                           "medium": f"reachable if you {action}.",
-                           "low": f"Explore: {action}."}[confidence]))
+    zoom_out = ("Take a 1.5x wider window " + (f"and {action}" if parts else
+                                                "around the same centre")) if wider else None
+    if decision.get("held_back"):
+        rec["headline"] = ("(1,1) may be in this window, but the electron count is not certain "
+                           "enough to call it found. " + (
+                               f"{zoom_out}, to see more of the empty region." if wider else
+                               f"Next: {action}, to see more of the empty region." if parts else
+                               "Rescan with the window below, to see more of the empty region."))
+    elif wider:
+        rec["headline"] = f"(1,1) is near this window but could not be confirmed. {zoom_out}."
+    else:
+        rec["headline"] = ({"high": "(1,1) is outside this window. ",
+                            "medium": "(1,1) is probably ",
+                            "low": "Not enough in view to locate (1,1). "}[confidence]
+                           + ({"high": f"To centre it, {action}.",
+                               "medium": f"reachable if you {action}.",
+                               "low": f"Explore: {action}."}[confidence]))
     sx, sy = x_rng[1] - x_rng[0], y_rng[1] - y_rng[0]
     steps.append(f"Next scan: {xg} {fmt_v(x_rng[0], sx)} to {fmt_v(x_rng[1], sx)} ({nx} points), "
                  f"{yg} {fmt_v(y_rng[0], sy)} to {fmt_v(y_rng[1], sy)} ({ny} points).")
@@ -605,5 +645,10 @@ def widen_if_revisited(history, scan: Scan, x_rng: list, y_rng: list, warnings: 
         return x_rng, y_rng
     warnings.append(f"The suggested window was already scanned (scan {seen}) without reaching "
                     f"{what}, so the next scan covers both it and this window.")
-    return ([min(x_rng[0], float(scan.x[0])), max(x_rng[1], float(scan.x[-1]))],
-            [min(y_rng[0], float(scan.y[0])), max(y_rng[1], float(scan.y[-1]))])
+    x_u = [min(x_rng[0], float(scan.x[0])), max(x_rng[1], float(scan.x[-1]))]
+    y_u = [min(y_rng[0], float(scan.y[0])), max(y_rng[1], float(scan.y[-1]))]
+    if same_as_scan(scan, x_u, y_u):               # covering both is this window again
+        warnings[-1] = (f"The suggested window was already scanned (scan {seen}) without "
+                        f"reaching {what}, so the next window is 1.5x wider.")
+        return widened(x_u, y_u, 1.5)
+    return x_u, y_u

@@ -62,7 +62,8 @@ def test_request_forms_and_validation():
                          a_boundaries=[[(820, 810), (822, 850)]], a_offset=0)
     ann = lab.to_annotation("s1", "mV")
     assert ann["a_boundaries"] == [[[0.82, 0.81], [0.822, 0.85]]] and ann["origin"] == "api"
-    assert set(protocol.json_schemas()) == {"protocol", "request", "response"}
+    assert set(protocol.json_schemas()) == {"protocol", "request", "response", "run_start",
+                                            "run_event", "run_close"}
 
 
 def test_navigation_over_http(ws, oracle_analyzer):

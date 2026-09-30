@@ -13,6 +13,10 @@ one of three outcomes:
 
 The same request, with a ``label`` attached, submits a scan as training data.
 
+Every analysed scan that is saved is also recorded in the automation tree (``runs.py``): the
+response's ``run`` block says where. ``options.run_id`` groups a backend's requests into one
+tune-up run; without it, scans join their device's open run.
+
 Transport: HTTP (``POST /api/v1/analyze``, ``POST /api/v1/scans``; see ``server/app.py``) or
 files (``chargecell analyze request.json --json``). ``chargecell schema`` prints the JSON Schema.
 All voltages in responses are volts. The full specification with examples is docs/PROTOCOL.md.
@@ -182,14 +186,30 @@ class Label(_Strict):
 
 class Options(_Strict):
     save: bool = Field(True, description="store the scan and result in the workspace (shows in "
-                                         "the GUI and lets later guidance use this scan)")
+                                         "the GUI, lets later guidance use this scan, and "
+                                         "records it in the automation tree)")
     model_id: Optional[str] = Field(None, description="model to use; default: the active one")
+    run_id: Optional[str] = Field(
+        None, description="automation-tree run to record this scan in; created if new. "
+                          "Default: the device's open run (a new one after 4 h without scans)")
+    stage: Optional[str] = Field(
+        None, max_length=120, description="name of the tune-up stage this scan belongs to, "
+                                          "e.g. 'Q1 loading'. Default: one stage per kind of "
+                                          "scan and pair of gates")
 
     @field_validator("model_id")
     @classmethod
     def _safe_model(cls, v):
         if v is not None and not _ID_RE.match(v):
             raise ValueError("unknown model id")
+        return v
+
+    @field_validator("run_id")
+    @classmethod
+    def _safe_run(cls, v):
+        if v is not None and (not _ID_RE.match(v) or v == "index"):
+            raise ValueError("run_id may contain letters, digits, '.', '_' and '-' only "
+                             "(max 128 characters)")
         return v
 
 
@@ -250,6 +270,12 @@ class ScanStep(_Strict):
     basis: str = ""
 
 
+class RunRef(_Strict):
+    run_id: str
+    stage_id: str
+    node_id: str = Field(description="the scan's node in the run's tree")
+
+
 class Response(_Strict):
     protocol: Literal["chargecell/1"] = PROTOCOL
     request_id: Optional[str] = None
@@ -270,6 +296,9 @@ class Response(_Strict):
     warnings: list[str] = Field(default_factory=list)
     model_id: Optional[str] = None
     created: Optional[str] = None
+    run: Optional[RunRef] = Field(
+        None, description="where the scan was recorded in the automation tree (null if not "
+                          "saved)")
 
 
 def _window(w: dict) -> Window:
@@ -344,7 +373,9 @@ def is_request(obj: Any) -> bool:
 
 def json_schemas() -> dict:
     return {"protocol": PROTOCOL, "request": Request.model_json_schema(),
-            "response": Response.model_json_schema()}
+            "response": Response.model_json_schema(),
+            "run_start": RunStart.model_json_schema(), "run_event": RunEvent.model_json_schema(),
+            "run_close": RunClose.model_json_schema()}
 
 
 def encode_array(a: np.ndarray, dtype: str = "float32") -> dict:
@@ -372,10 +403,51 @@ def handle_analyze(ws, req: Request) -> Response:
         raise ProtocolError(f"unknown model id {req.options.model_id}")
     cfg = ws.get_device(scan.device)
     result = analyze(ws, scan, req.options.model_id, cfg)
+    resp = response_from_analysis(result, cfg, req.request_id)
     if req.options.save:
+        from . import runs
         ws.save_scan(scan)
         ws.save_analysis(scan.id, result)
-    return response_from_analysis(result, cfg, req.request_id)
+        resp.run = RunRef(**runs.record(ws, scan, result, run_id=req.options.run_id,
+                                        stage=req.options.stage, source="backend",
+                                        request_id=req.request_id))
+    return resp
+
+
+# ---------------------------------------------------------------------------------------------
+# Runs (automation tree): requests a backend sends besides scans
+# ---------------------------------------------------------------------------------------------
+class RunStart(_Strict):
+    protocol: Literal["chargecell/1"] = PROTOCOL
+    device: str = Field("default", description="device name, as in scans")
+    run_id: Optional[str] = Field(None, description="choose the id; default: generated")
+    title: str = Field("", max_length=200, description="e.g. 'Tune-up of Q1, cooldown 7'")
+    cooldown: str = ""
+
+    @field_validator("device", "run_id", "cooldown")
+    @classmethod
+    def _safe(cls, v, info):
+        if v and (not _ID_RE.match(v) or v == "index"):
+            raise ValueError(f"{info.field_name} may contain letters, digits, '.', '_' and '-' "
+                             "only (max 128 characters)")
+        return v
+
+
+class RunEvent(_Strict):
+    protocol: Literal["chargecell/1"] = PROTOCOL
+    text: str = Field(max_length=2000, description="what was done, in words, e.g. 'retuned "
+                                                   "the sensor'")
+    gate_changes: dict[str, float] = Field(default_factory=dict,
+                                           description="gate -> change applied, in voltage_unit")
+    voltage_unit: Literal["V", "mV"] = "V"
+    by: str = Field("", max_length=120, description="who or what did it")
+    note: bool = Field(False, description="a remark rather than an action")
+
+
+class RunClose(_Strict):
+    protocol: Literal["chargecell/1"] = PROTOCOL
+    result: Literal["done", "stopped", "aborted"] = "done"
+    note: str = Field("", max_length=2000)
 
 
 def handle_submit(ws, req: Request) -> dict:

@@ -6,6 +6,7 @@
     chargecell analyze    analyse scan files (or chargecell/1 request files) and print the result
     chargecell navigate   test the guidance on simulated practice devices
     chargecell schema     print the JSON Schema of the chargecell/1 request and response
+    chargecell runs       list tune-up runs, print one as a graded tree, or --stats across runs
 """
 from __future__ import annotations
 
@@ -110,10 +111,12 @@ def cmd_analyze(a) -> None:
             scan = load_any(f, meta={"x_gate": a.x_gate, "y_gate": a.y_gate, "device": a.device,
                                      "cooldown": a.cooldown})
             res = analyze(ws, scan)
+            resp = protocol.response_from_analysis(res, ws.get_device(scan.device))
             if a.save:
+                from . import runs
                 ws.save_scan(scan)
                 ws.save_analysis(scan.id, res)
-            resp = protocol.response_from_analysis(res, ws.get_device(scan.device))
+                resp.run = protocol.RunRef(**runs.record(ws, scan, res, source="cli"))
         if out_dir:
             (out_dir / f"{f.stem}.response.json").write_text(resp.model_dump_json(indent=2))
         if a.json:
@@ -145,6 +148,33 @@ def cmd_navigate(a) -> None:
               "" if x["correct"] in (None, True) else "(WRONG: truth disagrees)",
               [t["status"][:5] for t in x["trail"]])
     print(json.dumps({k: v for k, v in r.items() if k != "results"}, indent=1))
+
+
+def cmd_runs(a) -> None:
+    from . import runs
+    from .storage import Workspace
+
+    ws = Workspace(a.workspace)
+    if a.stats:
+        print(json.dumps(runs.stats(ws, device=a.device, source=a.source), indent=1))
+        return
+    if a.run_id:
+        run = runs.load(ws, a.run_id)
+        if run is None:
+            raise SystemExit(f"no run {a.run_id} in {ws.root}")
+        print(json.dumps({**run, "nodes": runs.ordered(run)}, indent=1) if a.json
+              else runs.format_tree(run))
+        return
+    rows = runs.list_runs(ws, device=a.device, source=a.source)
+    if a.json:
+        print(json.dumps(rows, indent=1))
+        return
+    for r in rows:
+        stages = ", ".join(f"{st['kind']} {st['grade']}" for st in r["stages"])
+        print(f"{r['id']}  {r['grade']:5s} {r['device']:16s} {r['n_scans']:3d} scans  "
+              f"{r['created'][:16]}  {stages}")
+    if not rows:
+        print("No runs yet: runs are recorded when scans are analysed and saved.")
 
 
 def main(argv=None) -> None:
@@ -203,6 +233,14 @@ def main(argv=None) -> None:
 
     s = sub.add_parser("schema", help="print the chargecell/1 JSON Schema")
     s.set_defaults(fn=cmd_schema)
+
+    s = sub.add_parser("runs", help="list tune-up runs, show one as a graded tree, or --stats")
+    s.add_argument("run_id", nargs="?", default=None)
+    s.add_argument("--device", default=None)
+    s.add_argument("--source", default=None, choices=["backend", "gui", "cli", "practice"])
+    s.add_argument("--stats", action="store_true", help="success rates and failure modes")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_runs)
 
     a = p.parse_args(argv)
     a.fn(a)

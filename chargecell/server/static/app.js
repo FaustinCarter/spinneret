@@ -375,10 +375,13 @@ pages.review = {
   renderSide() {
     const r = this.analysis, sc = this.scan, side = this.side;
     const meta = sc.meta;
+    const summary = S.scans.find(s => s.id === this.id);
+    const ref = (r && r.run) || (summary && summary.run);
     const info = h("div", { class: "panel small" },
       h("div", { class: "row" }, h("b", {}, `${meta.x_gate} vs ${meta.y_gate}`), h("span", { class: "muted" }, `${sc.nx} x ${sc.ny} points`)),
       h("div", { class: "muted" }, `${meta.device}${meta.cooldown ? " \u00b7 cooldown " + meta.cooldown : ""} \u00b7 ${meta.source} \u00b7 ${when(meta.created)}`),
-      meta.notes ? h("div", { class: "muted" }, meta.notes) : null);
+      meta.notes ? h("div", { class: "muted" }, meta.notes) : null,
+      ref ? h("div", {}, h("a", { href: `#/runs/${encodeURIComponent(ref.run_id)}` }, "Show this scan's run (audit log)")) : null);
     if (!r) {
       side.replaceChildren(h("div", { class: "panel decision" },
         h("div", { class: "status-word status-none" }, "Not analysed yet"),
@@ -963,6 +966,133 @@ pages.scans = {
     await api("/api/analyze_all?only_new=true", { method: "POST" });
     toast("Analysing new scans in the background");
     pollStatus();
+  },
+};
+
+// ---------------------------------------------------------------- Runs page (automation tree)
+const GRADE = {
+  pass: ["✓", "OK"], warn: ["!", "Check"], fail: ["✗", "Failed"],
+  info: ["·", "Action"], open: ["…", "In progress"],
+};
+const SOURCE_LABEL = { backend: "measurement code", gui: "GUI", cli: "command line", practice: "practice device" };
+const gradeMark = g => h("span", { class: `grade ${g}`, title: (GRADE[g] || ["", g])[1], "aria-label": (GRADE[g] || ["", g])[1] }, (GRADE[g] || ["?"])[0]);
+
+pages.runs = {
+  build() {
+    const root = $("#page-runs");
+    this.filters = { device: "", source: "" };
+    this.filterBar = h("div", { class: "row" });
+    this.list = h("div", { class: "table-wrap runs-list" });
+    this.tree = h("div", { class: "panel run-tree" });
+    this.stats = h("div", { class: "panel" });
+    root.append(
+      h("header", {}, h("h1", {}, "Runs"), this.filterBar),
+      h("p", { class: "muted small", style: "max-width:900px" },
+        "Every scan ChargeCell analyses is recorded in a run: what was measured, what ChargeCell concluded, what it advised, whether the next scan followed the advice, and what the operator reported doing. Each step is graded when it happens: ",
+        gradeMark("pass"), " OK, ", gradeMark("warn"), " a person should check, ", gradeMark("fail"), " failed, ", gradeMark("open"), " in progress."),
+      h("div", { class: "runs-layout" }, this.list, this.tree),
+      h("div", { style: "margin-top:16px" }, this.stats));
+  },
+
+  async enter(id) {
+    const q = new URLSearchParams();
+    if (this.filters.device) q.set("device", this.filters.device);
+    if (this.filters.source) q.set("source", this.filters.source);
+    const [rows, all] = await Promise.all([api(`/api/v1/runs?${q}`), api("/api/v1/runs")]);
+    this.rows = rows;
+    const devices = [...new Set(all.map(r => r.device))];
+    const sel = (key, opts, label) => h("label", { class: "row", style: "gap:6px" }, label, h("select", {
+      onchange: e => { this.filters[key] = e.target.value; this.enter(this.id); } },
+      opts.map(([v, t]) => h("option", { value: v, selected: this.filters[key] === v }, t))));
+    this.filterBar.replaceChildren(
+      sel("device", [["", "All devices"], ...devices.map(d => [d, d])], "Device"),
+      sel("source", [["", "All"], ...Object.entries(SOURCE_LABEL)], "Recorded from"),
+      h("button", { onclick: () => this.enter(this.id) }, "Refresh"));
+    this.id = id && rows.find(r => r.id === id) ? id : (rows[0] || {}).id;
+    this.renderList();
+    await this.renderTree();
+    this.renderStats(await api(`/api/v1/run_stats?${q}`));
+  },
+
+  renderList() {
+    if (!this.rows.length) {
+      this.list.replaceChildren(h("div", { class: "empty" }, h("h2", {}, "No runs yet"),
+        h("p", {}, "Runs appear as soon as scans are analysed: from your measurement code, from the Review page, or from a practice device.")));
+      return;
+    }
+    this.list.replaceChildren(h("table", { class: "list" },
+      h("thead", {}, h("tr", {}, ["", "Run", "Stages"].map(t => h("th", {}, t)))),
+      h("tbody", {}, this.rows.map(r => h("tr", { class: `click${r.id === this.id ? " current" : ""}`, onclick: () => go("runs", r.id) },
+        h("td", {}, gradeMark(r.grade)),
+        h("td", {}, h("div", {}, r.title), h("div", { class: "id" }, `${r.device} · ${when(r.created)} · ${r.n_scans} scan${r.n_scans === 1 ? "" : "s"} · ${SOURCE_LABEL[r.source] || r.source}`)),
+        h("td", {}, h("div", { class: "stage-chips" }, r.stages.map(st => h("span", { class: `chip ${st.grade}`, title: st.title }, gradeMark(st.grade), " ", st.kind)))))))));
+  },
+
+  async renderTree() {
+    if (!this.id) { this.tree.replaceChildren(h("p", { class: "muted" }, "Select a run.")); return; }
+    const run = await api(`/api/v1/runs/${encodeURIComponent(this.id)}`);
+    const root = run.nodes[0];
+    const rows = run.nodes.slice(1).map(n => {
+      const d = n.data || {};
+      const extra = [];
+      if (n.type === "measure") {
+        if (d.followed === "no") extra.push(h("div", { class: "warn small" }, `Did not follow the last advice: ${d.deviation}.`));
+        if (d.followed === "yes") extra.push(h("div", { class: "muted small" }, "Followed the last advice."));
+        extra.push(h("button", { class: "small-btn", onclick: () => go("review", d.scan_id) }, "Open scan"));
+      }
+      if (n.type === "analysis" && d.checks && d.checks.length) extra.push(h("div", { class: "muted small" }, "Held back from FOUND: " + d.checks.join("; ") + "."));
+      if (n.type === "advice" && d.window) {
+        const w = d.window;
+        extra.push(h("div", { class: "muted small" }, `${w.x_gate} ${V4(w.x[0])} to ${V4(w.x[1])} V, ${w.y_gate} ${V4(w.y[0])} to ${V4(w.y[1])} V (${w.x[2]} x ${w.y[2]} points)`));
+      }
+      const title = n.type === "analysis" ? `${SHORT_STATUS[d.status] || d.status}${d.reason && d.reason !== "none" ? ": " + (REASON_LABEL[d.reason] || d.reason) : ""}` : n.title;
+      return h("div", { class: `tnode t-${n.type}`, style: `padding-left:${(n.depth - 1) * 20 + 4}px` },
+        gradeMark(n.grade),
+        h("div", { class: "tbody" },
+          h("div", {}, h("span", { class: "ttime" }, n.time.slice(11, 19)), " ", h("b", {}, title), n.summary ? h("span", { class: "tsum" }, " — ", n.summary) : null),
+          extra));
+    });
+    const note = h("input", { placeholder: "Add a note to this run", style: "flex:1" });
+    this.tree.replaceChildren(
+      h("div", { class: "row" }, gradeMark(run.grade), h("h2", { style: "margin:0" }, root.title), h("span", { class: "spacer" }),
+        h("a", { class: "button", href: `/api/v1/runs/${encodeURIComponent(run.id)}?download=true` }, "Download (JSON)"),
+        h("a", { class: "button", href: `/api/v1/runs/${encodeURIComponent(run.id)}?format=text&download=true` }, "Download (text)")),
+      h("p", { class: "muted small" }, `${run.device}${run.cooldown ? " · cooldown " + run.cooldown : ""} · started ${when(run.created)} · ${root.summary}${run.closed && run.closed.note ? " · " + run.closed.note : ""}`),
+      h("div", { class: "tree" }, rows.length ? rows : h("p", { class: "muted" }, "Nothing recorded yet.")),
+      h("div", { class: "row", style: "margin-top:12px" }, note,
+        h("button", { onclick: async () => {
+          if (!note.value.trim()) return;
+          await api(`/api/v1/runs/${encodeURIComponent(run.id)}/events`, { method: "POST", json: { text: note.value.trim(), note: true, by: annotatorName() } });
+          this.renderTree();
+        } }, "Add note"),
+        run.closed ? null : h("button", { onclick: async () => {
+          await api(`/api/v1/runs/${encodeURIComponent(run.id)}/close`, { method: "POST", json: { result: "done" } });
+          toast("Run marked as finished"); this.enter(run.id);
+        } }, "Mark run finished")));
+  },
+
+  renderStats(st) {
+    const kinds = Object.entries(st.per_kind || {});
+    const frac = (a, b) => b ? `${a} of ${b} (${pct(a / b)})` : "–";
+    const list = (items, empty) => items.length ? h("ul", { class: "steps small" }, items.slice(0, 6).map(f =>
+      h("li", {}, `${f.kind} · ${SHORT_STATUS[f.status] || f.status}: ${REASON_LABEL[f.reason] || f.reason} — ${f.count}`))) : h("p", { class: "muted small" }, empty);
+    const adv = st.advice_followed || { yes: 0, no: 0 }, rv = st.reviews || { agree: 0, disagree: 0 };
+    this.stats.replaceChildren(
+      h("h2", {}, `Across ${st.runs} run${st.runs === 1 ? "" : "s"}`),
+      kinds.length ? h("div", { class: "table-wrap" }, h("table", { class: "list" },
+        h("thead", {}, h("tr", {}, ["Scan kind", "Goals reached", "Median scans to goal", "90% within", "Stalled", "Left unfinished", "In progress", "Wrong “found” (practice)"].map(t => h("th", {}, t)))),
+        h("tbody", {}, kinds.map(([k, v]) => h("tr", {},
+          h("td", {}, KIND_LABEL[k] || k),
+          h("td", {}, frac(v.reached, v.stages - v.open)),
+          h("td", {}, v.median_scans ?? "–"), h("td", {}, v.p90_scans ?? "–"),
+          h("td", {}, v.stalled), h("td", {}, v.left), h("td", {}, v.open),
+          h("td", { class: v.wrong_found ? "warn" : "" }, v.wrong_found)))))) : h("p", { class: "muted small" }, "No goals recorded yet."),
+      h("div", { class: "two-col", style: "margin-top:12px" },
+        h("div", {}, h("h3", {}, "Scans that failed or needed review"), list(st.failure_modes || [], "None.")),
+        h("div", {}, h("h3", {}, "Where unfinished goals stopped"), list(st.stall_points || [], "None."))),
+      h("p", { class: "small", style: "margin-top:8px" },
+        `Next scans that followed the advice: ${frac(adv.yes, adv.yes + adv.no)}. `,
+        `Labels that agreed with the analysis: ${frac(rv.agree, rv.agree + rv.disagree)}.`));
   },
 };
 

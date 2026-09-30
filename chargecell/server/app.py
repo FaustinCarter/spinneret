@@ -12,10 +12,10 @@ from pydantic import ValidationError
 
 import numpy as np
 from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-from .. import kinds, labels, protocol, schema, virtual
+from .. import kinds, labels, protocol, runs, schema, virtual
 from ..analysis.decide import analyze, prediction_for_annotation
 from ..config import DeviceConfig
 from ..importers.generic import load_any
@@ -169,6 +169,7 @@ def create_app(workspace: str | Path) -> FastAPI:
         ann["updated"] = schema.now_iso()
         ann.setdefault("created", ann["updated"])
         ws.save_annotation(scan_id, ann)
+        runs.record_review(ws, scan_id, ann)            # the label confirms or corrects a call
         return _clean(dict(annotation=ann, history=len(ws.annotation_history(scan_id)),
                            **_preview(s, ann)))
 
@@ -214,6 +215,7 @@ def create_app(workspace: str | Path) -> FastAPI:
         except RuntimeError as e:
             raise HTTPException(409, str(e))
         ws.save_analysis(scan_id, res)
+        res["run"] = runs.record(ws, s, res)            # automation tree
         return _clean(res)
 
     @app.get("/api/scans/{scan_id}/analysis")
@@ -412,13 +414,14 @@ def create_app(workspace: str | Path) -> FastAPI:
         win = ((res or {}).get("recommendation") or {}).get(window)
         if not win:
             raise HTTPException(400, "This analysis has no recommended window.")
-        rec_move = (res["recommendation"].get("move") or {})
-        vd = ws.load_virtual_device(vd_id)
-        for g, d in rec_move.items():   # e.g. an exchange-gate change before the scan
-            if g in vd["voltage_state"] and g not in (win["x_gate"], win["y_gate"]):
-                vd["voltage_state"][g] += d
-        ws.save_virtual_device(vd_id, vd)
-        virtual.follow_fix(ws, vd_id, res, win)         # e.g. retune the sensor, as advised
+        if ws.load_virtual_device(vd_id) is None:
+            raise HTTPException(404, "The practice device of this scan no longer exists.")
+        # as an operator would: set other gates as advised (e.g. an exchange gate), apply the
+        # fix for an unreadable scan (retune the sensor, average longer), then measure
+        ref = runs.run_ref(ws, scan_id)
+        for text, changes in virtual.apply_advice(ws, vd_id, res, win):
+            if ref:
+                runs.add_action(ws, ref["run_id"], text, changes, by="practice operator")
         kind = "tiebar" if window in ("tiebar_window", "retune_window") else s.kind
         try:
             new = virtual.measure(ws, vd_id, win["x_gate"], win["y_gate"], tuple(win["x"]),
@@ -427,10 +430,75 @@ def create_app(workspace: str | Path) -> FastAPI:
             raise HTTPException(400, str(e))
         ws.save_scan(new)
         try:
-            ws.save_analysis(new.id, analyze(ws, new))
+            res2 = analyze(ws, new)
         except RuntimeError:
-            pass
+            return {"scan_id": new.id}
+        ws.save_analysis(new.id, res2)
+        runs.record(ws, new, res2, run_id=ref["run_id"] if ref else None)
         return {"scan_id": new.id}
+
+    # ------------------------------------------------------------------ automation tree (runs)
+    def _body(model, body: dict):
+        try:
+            return model.model_validate(body)
+        except ValidationError as e:
+            raise HTTPException(422, e.errors(include_url=False, include_context=False))
+
+    def run_or_404(run_id: str) -> dict:
+        run = runs.load(ws, run_id)
+        if run is None:
+            raise HTTPException(404, f"No run with id {run_id}.")
+        return run
+
+    @app.get("/api/v1/runs")
+    def v1_runs(device: Optional[str] = None, source: Optional[str] = None):
+        """Runs of the automation tree, most recent first."""
+        return _clean(runs.list_runs(ws, device=device, source=source))
+
+    @app.post("/api/v1/runs")
+    def v1_run_start(body: dict = Body(default={})):
+        req = _body(protocol.RunStart, body)
+        try:
+            run = runs.new_run(ws, req.device, req.title, req.cooldown, source="backend",
+                               run_id=req.run_id)
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        return _clean(runs.summary(run))
+
+    @app.get("/api/v1/run_stats")
+    def v1_run_stats(device: Optional[str] = None, source: Optional[str] = None):
+        """Success rates and failure modes across runs, per kind of scan."""
+        return _clean(runs.stats(ws, device=device, source=source))
+
+    @app.get("/api/v1/runs/{run_id}")
+    def v1_run(run_id: str, format: str = "json", download: bool = False):
+        """One run: its nodes in depth-first order (the order things happened), with depth."""
+        run = run_or_404(run_id)
+        if format == "text":
+            return PlainTextResponse(runs.format_tree(run), headers=(
+                {"Content-Disposition": f'attachment; filename="{run_id}.txt"'} if download
+                else None))
+        body = _clean({**{k: v for k, v in run.items() if k != "nodes"},
+                       "nodes": runs.ordered(run)})
+        headers = ({"Content-Disposition": f'attachment; filename="{run_id}.json"'}
+                   if download else None)
+        return JSONResponse(body, headers=headers)
+
+    @app.post("/api/v1/runs/{run_id}/events")
+    def v1_run_event(run_id: str, body: dict = Body(...)):
+        """Record something the backend or operator did (or a note) in the run."""
+        run_or_404(run_id)
+        ev = _body(protocol.RunEvent, body)
+        k = 1e3 if ev.voltage_unit == "mV" else 1.0
+        node = runs.add_action(ws, run_id, ev.text, {g: v / k for g, v in ev.gate_changes.items()},
+                               by=ev.by, note=ev.note)
+        return _clean(node)
+
+    @app.post("/api/v1/runs/{run_id}/close")
+    def v1_run_close(run_id: str, body: dict = Body(default={})):
+        run_or_404(run_id)
+        c = _body(protocol.RunClose, body)
+        return _clean(runs.summary(runs.close(ws, run_id, c.result, c.note)))
 
     # ------------------------------------------------------------------ chargecell/1 protocol
     def _parse(body: dict) -> protocol.Request:

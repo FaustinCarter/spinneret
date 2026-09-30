@@ -63,11 +63,13 @@ def main():
         conf[schema.STATUSES.index(t["status"]), schema.STATUSES.index(res["status"])] += 1
         review += res["needs_review"]
     tp, fp, fn = conf[0, 0], conf[1:, 0].sum(), conf[0, 1:].sum()
-    print("HELDOUT", json.dumps(dict(
-        n=a.n, status_accuracy=round(np.trace(conf) / a.n, 3),
-        found_precision=round(tp / max(1, tp + fp), 3), found_recall=round(tp / max(1, tp + fn), 3),
-        flagged_for_review=round(review / a.n, 3), confusion_rows_true_cols_pred=conf.tolist(),
-        labels=schema.STATUSES, seconds_per_scan=round((time.time() - t0) / a.n, 3))))
+    if a.n:
+        print("HELDOUT", json.dumps(dict(
+            n=a.n, status_accuracy=round(np.trace(conf) / a.n, 3),
+            found_precision=round(tp / max(1, tp + fp), 3),
+            found_recall=round(tp / max(1, tp + fn), 3),
+            flagged_for_review=round(review / a.n, 3), confusion_rows_true_cols_pred=conf.tolist(),
+            labels=schema.STATUSES, seconds_per_scan=round((time.time() - t0) / a.n, 3))))
     if a.nav:
         nav = virtual.evaluate(ws, kind, n_devices=a.nav, max_scans=a.max_scans, seed=77)
         print("NAV", json.dumps({k: v for k, v in nav.items() if k != "results"}))

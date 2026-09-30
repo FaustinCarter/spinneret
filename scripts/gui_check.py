@@ -7,7 +7,8 @@ Needs: pip install playwright && python -m playwright install chromium
 Does: creates two practice devices if the workspace has no scans; analyses one (if a model is
 active) so the Review page shows overlays; screenshots every page; for each scan kind with an
 active model, creates a practice device, analyses it, follows the advice once on the practice
-device and screenshots the Review page (review_<kind>_1.png, _2.png); draws an A and a B boundary
+device and screenshots the Review page (review_<kind>_1.png, _2.png) and the Runs page with the
+automation tree they recorded (runs.png); draws an A and a B boundary
 in the labeller with real mouse input, sets counts and outcome, saves, and checks the saved
 annotation through the API. Prints browser console errors (an expected 404 is filtered out).
 Look at the PNGs: layout problems do not show up as errors.
@@ -66,6 +67,14 @@ async def run(url: str, out: Path) -> None:
                 if step == 2 or key is None:
                     break
                 k_sid = api(url, f"/api/scans/{k_sid}/run_next?window={key}", "POST")["scan_id"]
+
+        # the automation tree of the runs recorded above
+        rows = api(url, "/api/v1/runs")
+        if rows:
+            await pg.goto(f"{url}/#/runs/{rows[0]['id']}")
+            await pg.wait_for_timeout(1500)
+            await pg.screenshot(path=str(out / "runs.png"), full_page=True)
+            print(f"runs: {len(rows)} recorded, latest has {rows[0]['n_scans']} scan(s)")
 
         # labeller interaction, on a fresh (unlabelled) practice scan
         sid = api(url, "/api/virtual", "POST", {})["scan_id"]

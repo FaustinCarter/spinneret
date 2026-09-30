@@ -8,6 +8,8 @@ it can be backed up, versioned, inspected, or shared without ChargeCell.
       scans/<scan_id>/annotation.json     current label
       scans/<scan_id>/annotation_history/ every saved version (audit trail)
       scans/<scan_id>/analysis.json       latest model analysis
+      scans/<scan_id>/run.json            where the scan sits in the automation tree
+      runs/<run_id>.json, runs/index.json automation tree of each tune-up run (runs.py)
       synthetic/<name>/manifest.json + shard_###.npz
       models/<model_id>/model.json + member_#.pt
       models/ACTIVE                       id of the model used for analysis
@@ -62,7 +64,7 @@ def read_json(path: Path, default=None):
 class Workspace:
     def __init__(self, root: str | Path):
         self.root = Path(root).expanduser().resolve()
-        for sub in ("devices", "scans", "synthetic", "models", "virtual_devices", "jobs"):
+        for sub in ("devices", "scans", "synthetic", "models", "virtual_devices", "jobs", "runs"):
             (self.root / sub).mkdir(parents=True, exist_ok=True)
         if not list((self.root / "devices").glob("*.json")):
             self.save_device(DeviceConfig())
@@ -105,6 +107,7 @@ class Workspace:
         meta = read_json(d / "meta.json", {})
         ann = read_json(d / "annotation.json")
         ana = read_json(d / "analysis.json")
+        ref = read_json(d / "run.json")
         return {
             **{k: meta.get(k) for k in ("id", "x_gate", "y_gate", "device", "cooldown", "kind",
                                         "source", "created", "shape", "extent", "notes")},
@@ -117,6 +120,7 @@ class Workspace:
                 "confidence": ana.get("confidence"), "needs_review": ana.get("needs_review"),
                 "model_id": ana.get("model_id"), "uncertainty": ana.get("uncertainty", {}).get(
                     "score")},
+            "run": ref,
         }
 
     def delete_scan(self, scan_id: str) -> None:
