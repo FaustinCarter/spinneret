@@ -23,7 +23,8 @@ import numpy as np
 from .. import kinds, schema
 from ..preprocess import dilate, pack_lines, resample
 from .generator import (Artifacts, Window, _loguniform, oracle as pvp_oracle, render,
-                        sample_artifacts, sample_device, sensor_peak_mask, voltage_grid)
+                        sample_artifacts, sample_device, sensor_peak_mask, visible_noise,
+                        voltage_grid)
 from .physics import DeviceParams, classical_ground_state, sensor_current, sensor_slope
 
 STRONG_RATIO = 0.6   # coupling ratio above which the triple points are no longer distinct
@@ -251,8 +252,7 @@ def tiebar_oracle(p: DeviceParams, w: Window, art: Artifacts, rend: dict, geo: d
     snr_tb = np.nan
     if tb.any():
         mu = rend["mu"]
-        sigma_eff = np.sqrt(rend["sigma_white"] ** 2
-                            + (np.median(np.abs(sensor_slope(p, mu))) * rend["sigma_mu"]) ** 2)
+        sigma_eff = visible_noise(rend, w.fast_axis)
         dk = p.s_kappa[a] - p.s_kappa[b]
         contrast = np.abs(sensor_current(p, mu[tb] + dk / 2) - sensor_current(p, mu[tb] - dk / 2))
         snr_tb = float(np.percentile(contrast, 75) / sigma_eff)

@@ -164,3 +164,14 @@ Each entry: the decision, why, and what would change it. Newest last.
     with 4x longer averaging, as an expert would do before calling it. The FOUND checks and the
     threshold are unchanged. A window is confirmed at most once; after that, decision 25 applies.
     Scan ids now carry milliseconds so the scan history is in order even for fast loops.
+
+31. **"Too noisy" means too noisy to read.** The simulators labelled a scan `low_snr` when the
+    step contrast was below 1.5x an effective noise that counted slow sensor drift and telegraph
+    switching like white noise. Those show as streaks between sweeps but leave every step sharp,
+    and the second PvP network called such scans FOUND with confidence 0.99; it was right, and
+    the labels were wrong. These label errors were the false FOUNDs that forced its threshold
+    to 0.985 (recall 0.35). The label now uses `visible_noise`, the pixel-to-pixel noise along
+    the sweep, in all three simulators; about half of the old `low_snr` labels change. Scored
+    against corrected labels, the same network reaches FOUND precision 0.98 at recall 0.74, and
+    its calibrated threshold drops to 0.5. The FOUND checks and the precision target are
+    unchanged: only the labels became right.

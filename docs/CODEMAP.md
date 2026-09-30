@@ -218,7 +218,9 @@ region of 0.7–1.9 spacings; 30% of the others sit within ±1.6 spacings of (1,
 miscounting is easiest). `sample_artifacts` / `Artifacts`: jumps, latching,
 pink and telegraph noise, gain drift, white noise at a target SNR. `render` produces the
 signal, axes, occupancy, and sensor info. `oracle` produces the true status, reason, ref flags,
-vis_frac, SNR (charge-step contrast / noise), masks, target, spacing, and spectator occupancy.
+vis_frac, SNR (75th percentile of the charge-step contrast / `visible_noise`, the fast-axis
+pixel-to-pixel noise; shared by the PvT and tie-bar oracles), masks, target, spacing, and
+spectator occupancy.
 UNINTERPRETABLE precedence: merged > coarse (< 5 px per addition) > sensor_insensitive >
 low_snr (< 1.5) > weak sensor > charge_instability (≥ 2 big jumps). FOUND needs both refs and
 vis_frac ≥ 0.6. `full_cell` gives the complete (1,1) cell geometry. `generate_sample(rng,

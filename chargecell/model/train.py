@@ -366,22 +366,28 @@ def train(ws: Workspace, cfg: TrainConfig, progress: Callable[[float, str, dict]
     return model_id
 
 
-def recalibrate(ws: Workspace, model_id: str, target: float | None = None) -> dict:
-    """Re-calibrate a trained model's FOUND threshold on its own validation split (synthetic),
-    for the final decision, and update its model card. Returns the new synthetic metrics."""
+def recalibrate(ws: Workspace, model_id: str, target: float | None = None,
+                held_out: list[str] | None = None) -> dict:
+    """Re-calibrate a trained model's FOUND threshold for the final decision and update its
+    model card. Calibrates on its own validation split (synthetic), or on all of the synthetic
+    datasets ``held_out`` (never used in training, e.g. generated after a labelling change).
+    Returns the new synthetic metrics."""
     models, card = load_models(ws, model_id)
     cfg = card["config"]
     kind = model_kind(card)
-    syn = load_synthetic(ws, cfg["synthetic"], cfg["size"], kind)
-    idx = np.random.default_rng(cfg["seed"]).permutation(len(syn["status"]))
-    n_val = max(1, int(len(idx) * cfg["val_fraction"]))
-    val = subset(syn, idx[:n_val])
+    if held_out:
+        val = load_synthetic(ws, held_out, cfg["size"], kind)
+    else:
+        syn = load_synthetic(ws, cfg["synthetic"], cfg["size"], kind)
+        idx = np.random.default_rng(cfg["seed"]).permutation(len(syn["status"]))
+        n_val = max(1, int(len(idx) * cfg["val_fraction"]))
+        val = subset(syn, idx[:n_val])
     m = full_metrics(models, val, None, target if target is not None else cfg["target_precision"])
     card["previous_found_threshold"] = card.get("found_threshold")
     card["found_threshold"] = m["found_threshold"]
     card["uncertainty_threshold"] = float(np.percentile(_run(models, val, tta=TTA)["mi"], 90))
     card["tta"] = TTA
-    card["calibrated_on"] = "synthetic"
+    card["calibrated_on"] = "synthetic" + (f" ({', '.join(held_out)})" if held_out else "")
     card["metrics"]["synthetic"] = m
     write_json(ws.model_dir(model_id) / "model.json", card)
     return m

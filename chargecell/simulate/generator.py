@@ -197,6 +197,16 @@ def sample_artifacts(rng, kind: str = "normal") -> Artifacts:
 # ---------------------------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------------------------
+def visible_noise(rend: dict, fast_axis: str) -> float:
+    """The noise a charge step has to stand out from in the image: the pixel-to-pixel noise
+    along the sweep, std(diff(signal - clean along the fast axis)) / sqrt(2). White noise counts
+    fully; slow sensor drift, gain drift and rare telegraph switches (streaks between sweeps)
+    barely count, because a step stays sharp against them; frequent switching counts."""
+    n = np.asarray(rend["signal"], float) - np.asarray(rend["clean"], float)
+    d = np.diff(n, axis=0 if fast_axis == "y" else 1)
+    return float(np.std(d) / np.sqrt(2)) if d.size else float(rend["sigma_white"])
+
+
 def _pink(rng, n: int) -> np.ndarray:
     f = np.fft.rfftfreq(n)
     spec = (rng.normal(size=len(f)) + 1j * rng.normal(size=len(f)))
@@ -397,8 +407,7 @@ def oracle(p: DeviceParams, w: Window, art: Artifacts, rend: dict) -> dict:
 
     # --- interpretability: contrast of the charge steps themselves (not the sensor background)
     mu = rend["mu"]
-    sigma_eff = np.sqrt(rend["sigma_white"] ** 2
-                        + (np.median(np.abs(sensor_slope(p, mu))) * rend["sigma_mu"]) ** 2)
+    sigma_eff = visible_noise(rend, w.fast_axis)
     steps = []
     for fam, kap in (("a", p.s_kappa[a]), ("b", p.s_kappa[b])):
         m = masks[fam]

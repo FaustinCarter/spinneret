@@ -59,7 +59,12 @@ ChargeCell generates its own training data; no external simulator is needed.
 - **Labels come from the physics.** Status and reason are computed from ground truth (is (1,1)
   in the window, are the empty regions visible, what is the charge-step contrast relative to
   noise), not from the generator's intent. The requested outcome mix only steers where windows
-  are placed.
+  are placed. The noise in "too noisy" (`low_snr`, and the weak-contrast part of
+  `sensor_insensitive`) is the noise a step has to stand out from in the image: the
+  pixel-to-pixel noise along the sweep (`visible_noise`). Slow sensor drift and rare telegraph
+  switches show as streaks between sweeps but leave each step sharp, so they do not make a scan
+  unreadable; an earlier definition counted them like white noise and labelled about half of
+  its `low_snr` scans unreadable although an expert (and the network) reads them easily.
 - **Presets.** Linear and triangular triple-dot geometries with parameter ranges loosely matched to
   published HRL SLEDGE data. Every device is randomised (domain randomisation), so the model sees
   far more variety than one real device offers.

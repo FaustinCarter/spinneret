@@ -28,7 +28,7 @@ import numpy as np
 from .. import kinds, schema
 from ..preprocess import dilate, pack_lines, resample
 from .generator import (ANCHOR_WIDTH, Artifacts, _loguniform, _slow_index, measure_sensor,
-                        sample_artifacts, sample_device, sensor_peak_mask)
+                        sample_artifacts, sample_device, sensor_peak_mask, visible_noise)
 from .physics import DeviceParams, classical_ground_state, occupations, sensor_slope
 
 SLOW_GT = 0.3          # Gamma*tau below this: electrons do not follow the sweep ("slow")
@@ -328,8 +328,7 @@ def pvt_oracle(p: DeviceParams, q: PvTParams, w: PvTWindow, art: Artifacts, rend
 
     # interpretability (as for PvP): contrast of the loading steps against the noise
     mu = rend["mu"]
-    sigma_eff = np.sqrt(rend["sigma_white"] ** 2
-                        + (np.median(np.abs(sensor_slope(p, mu))) * rend["sigma_mu"]) ** 2)
+    sigma_eff = visible_noise(rend, w.fast_axis)
     snr, frac_weak = np.nan, 0.0
     if load.sum() >= 5:
         from .physics import sensor_current
