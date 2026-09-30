@@ -1,0 +1,23 @@
+# Never run yet (see docs/HANDOFF.md §4.6). Fix on first push if needed.
+name: tests
+on: [push, pull_request]
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (CPU torch)
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev,spinqick]"
+      - name: Front-end syntax check
+        run: |
+          node --check chargecell/server/static/app.js
+          node --check chargecell/server/static/plot.js
+      - name: Tests
+        run: pytest -q

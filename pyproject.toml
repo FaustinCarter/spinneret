@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chargecell"
+version = "0.1.0"
+description = "Find the (1,1) charge cell in double-quantum-dot charge stability diagrams, with operator guidance, labelling and training tools"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "scipy>=1.10",
+  "scikit-image>=0.21",
+  "torch>=2.1",
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
+  "pydantic>=2.5",
+  "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+spinqick = ["netCDF4>=1.6"]
+dev = ["pytest>=7", "httpx>=0.27", "netCDF4>=1.6"]
+
+[project.scripts]
+chargecell = "chargecell.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["chargecell*"]
+
+[tool.setuptools.package-data]
+chargecell = ["server/static/*", "assets/models/*/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

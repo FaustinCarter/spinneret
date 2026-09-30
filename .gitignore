@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ChargeCell workspaces and outputs (never commit lab data by accident)
+chargecell-workspace/
+*_ws/
+workspace/
+gui_shots/
+*.nc
+
+# Model weights: only the bundled starter model is tracked
+*.pt
+!chargecell/assets/models/**/*.pt
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
