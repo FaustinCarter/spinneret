@@ -47,9 +47,9 @@ def test_gui_workflow_through_api(ws, oracle_analyzer):
     res = c.post(f"/api/scans/{vid}/analyze").json()
     assert res["status"] in ("FOUND", "NOT_IN_WINDOW", "UNINTERPRETABLE")
     assert res["overlays"]["size"] == 64 and res["recommendation"]["headline"]
-    assert c.get(f"/api/scans/{vid}/export/next_scan.json").status_code == 200
-    code = c.get(f"/api/scans/{vid}/export/spinqick.py").text
-    assert "gvg_dc" in code or "No scan window" in code
+    r = c.get(f"/api/v1/scans/{vid}/response?download=true")
+    assert r.status_code == 200 and "attachment" in r.headers["content-disposition"]
+    assert r.json()["status"] == res["status"]
     if res["status"] != "FOUND":
         nxt = c.post(f"/api/scans/{vid}/run_next").json()["scan_id"]
         assert c.get(f"/api/scans/{nxt}/analysis").json()["scan_id"] == nxt
@@ -93,18 +93,3 @@ def test_training_smoke(ws):
                            (vs["P2"] - 0.04, vs["P2"] + 0.04, 64))
     res = analyze(ws, scan)
     assert res["model_id"] == mid and res["recommendation"]
-
-
-def test_spinqick_upload_through_api(ws, tmp_path):
-    from chargecell.importers.spinqick_nc import write_mock_spinqick_nc
-    f = tmp_path / "1790000000_gvg_dc.nc"
-    x, y = np.linspace(0.80, 0.86, 30), np.linspace(0.81, 0.85, 20)
-    write_mock_spinqick_nc(f, np.random.default_rng(1).normal(size=(20, 30)), x, y, "P2", "P3",
-                           {"P1": 0.9, "P2": 0.83, "P3": 0.83})
-    c = TestClient(create_app(ws.root))
-    r = c.post("/api/scans/import", files=[("files", (f.name, f.read_bytes(), "application/x-netcdf"))],
-               data={"device": "devA", "cooldown": "CD2"})
-    assert r.status_code == 200 and not r.json()["errors"], r.text
-    meta = c.get(f"/api/scans/{r.json()['imported'][0]}").json()["meta"]
-    assert (meta["x_gate"], meta["y_gate"], meta["source"]) == ("P2", "P3", "spinqick")
-    assert meta["voltage_state"]["P1"] == 0.9 and meta["cooldown"] == "CD2"

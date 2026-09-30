@@ -8,15 +8,16 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Any, Optional
 
+from pydantic import ValidationError
+
 import numpy as np
 from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .. import labels, schema, virtual
+from .. import labels, protocol, schema, virtual
 from ..analysis.decide import analyze, prediction_for_annotation
 from ..config import DeviceConfig
-from ..export import next_scan_json, spinqick_snippet, to_text
 from ..importers.generic import load_any
 from ..jobs import JobManager
 from ..model.infer import Analyzer
@@ -219,26 +220,17 @@ def create_app(workspace: str | Path) -> FastAPI:
             raise HTTPException(404, "This scan has not been analysed yet.")
         return _clean(res)
 
-    @app.get("/api/scans/{scan_id}/export/next_scan.json")
-    def export_json(scan_id: str, window: str = "next_window"):
+    @app.get("/api/v1/scans/{scan_id}/response")
+    def protocol_response(scan_id: str, download: bool = False):
+        """The saved analysis of a scan as a chargecell/1 response."""
         s = scan_or_404(scan_id)
         res = ws.load_analysis(scan_id)
         if not res:
             raise HTTPException(404, "Analyse the scan first.")
-        return PlainTextResponse(to_text(_clean(next_scan_json(s, res, window))),
-                                 media_type="application/json",
-                                 headers={"Content-Disposition":
-                                          f'attachment; filename="{scan_id}_next_scan.json"'})
-
-    @app.get("/api/scans/{scan_id}/export/spinqick.py")
-    def export_spinqick(scan_id: str, window: str = "next_window"):
-        s = scan_or_404(scan_id)
-        res = ws.load_analysis(scan_id)
-        if not res:
-            raise HTTPException(404, "Analyse the scan first.")
-        return PlainTextResponse(spinqick_snippet(s, res, ws.get_device(s.device), window),
-                                 headers={"Content-Disposition":
-                                          f'attachment; filename="{scan_id}_next_scan.py"'})
+        body = _clean(protocol.response_from_analysis(res, ws.get_device(s.device)).model_dump())
+        headers = ({"Content-Disposition": f'attachment; filename="{scan_id}_response.json"'}
+                   if download else None)
+        return JSONResponse(body, headers=headers)
 
     @app.post("/api/analyze_all")
     def analyze_all(only_new: bool = True):
@@ -386,7 +378,7 @@ def create_app(workspace: str | Path) -> FastAPI:
         vd_id = s.extra.get("virtual_device")
         if not vd_id:
             raise HTTPException(400, "Only scans from a virtual device can be measured from "
-                                     "here. For real devices, export the next scan settings.")
+                                     "here. For real devices, run the recommended scan on your setup.")
         res = ws.load_analysis(scan_id)
         win = ((res or {}).get("recommendation") or {}).get(window)
         if not win:
@@ -405,6 +397,38 @@ def create_app(workspace: str | Path) -> FastAPI:
         except RuntimeError:
             pass
         return {"scan_id": new.id}
+
+    # ------------------------------------------------------------------ chargecell/1 protocol
+    def _parse(body: dict) -> protocol.Request:
+        try:
+            return protocol.parse_request(body)
+        except ValidationError as e:
+            raise HTTPException(422, e.errors(include_url=False, include_context=False))
+
+    @app.post("/api/v1/analyze")
+    def v1_analyze(body: dict = Body(...)):
+        """Analyse a scan sent by any measurement backend (docs/PROTOCOL.md)."""
+        req = _parse(body)
+        try:
+            resp = protocol.handle_analyze(ws, req)
+        except protocol.ProtocolError as e:
+            raise HTTPException(422, str(e))
+        except RuntimeError as e:
+            raise HTTPException(409, str(e))
+        return _clean(resp.model_dump())
+
+    @app.post("/api/v1/scans")
+    def v1_submit(body: dict = Body(...)):
+        """Store a scan, optionally with an expert label, as training data."""
+        req = _parse(body)
+        try:
+            return protocol.handle_submit(ws, req)
+        except protocol.ProtocolError as e:
+            raise HTTPException(422, str(e))
+
+    @app.get("/api/v1/schema")
+    def v1_schema():
+        return protocol.json_schemas()
 
     # ------------------------------------------------------------------ static GUI
     app.mount("/static", StaticFiles(directory=STATIC), name="static")

@@ -150,6 +150,8 @@ def real_arrays(ws: Workspace, size: int, only_reviewed: bool = False) -> dict:
         if only_reviewed and not ann.get("reviewed"):
             continue
         scan = ws.load_scan(sid)
+        if scan.kind != "PvP":             # other scan kinds are stored for future models
+            continue
         xs = np.linspace(scan.x[0], scan.x[-1], size)
         ys = np.linspace(scan.y[0], scan.y[-1], size)
         d = dense_from_annotation(ann, xs, ys)

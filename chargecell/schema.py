@@ -96,8 +96,8 @@ class Scan:
     cooldown: str = ""
     kind: str = "PvP"                       # PvP is what the (1,1) finder handles
     voltage_state: dict[str, float] = field(default_factory=dict)
-    fast_axis: str = "y"                    # spinQICK gvg_dc sweeps y fast
-    source: str = "file"                    # file | spinqick | synthetic | virtual_device
+    fast_axis: str = "y"                    # which gate is swept in the inner loop
+    source: str = "file"                    # file | api | synthetic | virtual_device
     created: str = field(default_factory=now_iso)
     units: str = "a.u."
     notes: str = ""

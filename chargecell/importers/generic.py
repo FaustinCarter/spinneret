@@ -1,9 +1,9 @@
 """Import scans from common file formats.
 
 Supported:
-  .nc            spinQICK netCDF (see spinqick_nc.py)
+  .json          a chargecell/1 request (docs/PROTOCOL.md); its label, if any, is not imported
   .npz           arrays 'signal' (ny,nx), 'x' (nx,), 'y' (ny,)  [aliases: data/z, vx, vy]
-  .json          {"signal": [[...]], "x": [...], "y": [...], optional metadata keys}
+  .json          or {"signal": [[...]], "x": [...], "y": [...], optional metadata keys}
   .csv/.txt/.dat either a matrix (first row = x values, first column = y values), or three
                  columns x, y, signal (one row per point, any order)
 
@@ -13,14 +13,12 @@ from __future__ import annotations
 
 import io
 import json
-import os
-import tempfile
 from pathlib import Path
 
 import numpy as np
 
+from .. import protocol
 from ..schema import Scan
-from .spinqick_nc import load_spinqick_nc
 
 META_KEYS = ("x_gate", "y_gate", "device", "cooldown", "kind", "voltage_state", "fast_axis",
              "units", "notes")
@@ -65,24 +63,6 @@ def load_any(path: str | Path, content: bytes | None = None, meta: dict | None =
     meta = dict(meta or {})
     scale = 1e-3 if meta.pop("axis_units", "V") == "mV" else 1.0
     suffix = path.suffix.lower()
-    if suffix == ".nc":
-        tmp = None
-        if content is not None:           # netCDF4 needs a real file
-            fd, tmp = tempfile.mkstemp(suffix=".nc", prefix="chargecell_upload_")
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(content)
-        try:
-            scan = load_spinqick_nc(tmp or path, device=meta.get("device", "default"),
-                                    cooldown=meta.get("cooldown", ""))
-        finally:
-            if tmp:
-                os.unlink(tmp)
-        scan.extra["file"] = path.name
-        scan.notes = f"imported from {path.name}"
-        for k in ("notes",):
-            if meta.get(k):
-                setattr(scan, k, meta[k])
-        return scan
     file_meta: dict = {}
     if suffix == ".npz":
         with np.load(io.BytesIO(content) if content is not None else path,
@@ -98,12 +78,19 @@ def load_any(path: str | Path, content: bytes | None = None, meta: dict | None =
                 file_meta = json.loads(str(z["meta"]))
     elif suffix == ".json":
         d = json.loads(content.decode() if content is not None else path.read_text())
+        if protocol.is_request(d):
+            scan = protocol.parse_request(d).scan.to_scan(source="file")
+            for k in ("device", "cooldown", "notes"):
+                if meta.get(k) and not getattr(scan, k):
+                    setattr(scan, k, meta[k])
+            scan.notes = scan.notes or f"imported from {path.name}"
+            return scan
         sig, x, y = np.asarray(d["signal"], float), np.asarray(d["x"], float), np.asarray(d["y"], float)
         file_meta = {k: d[k] for k in META_KEYS if k in d}
     elif suffix in (".csv", ".txt", ".dat", ".tsv"):
         sig, x, y = _parse_text(content.decode() if content is not None else path.read_text())
     else:
-        raise ValueError(f"Unsupported file type '{suffix}'. Use .nc, .npz, .json or .csv.")
+        raise ValueError(f"Unsupported file type '{suffix}'. Use .json, .npz or .csv.")
     info = {**file_meta, **{k: v for k, v in meta.items() if v not in (None, "")}}
     sig = np.asarray(sig, float)
     if sig.shape == (len(x), len(y)) and sig.shape != (len(y), len(x)):

@@ -72,3 +72,43 @@ def test_navigation_reaches_11_with_perfect_perception(ws, oracle_analyzer):
     assert r["found"] >= 5, r
     assert r["correct"] == r["found"], "every FOUND must agree with the ground truth"
     assert r["median_scans"] <= 4, r
+
+
+def test_inconsistent_anchored_lines_lower_confidence(ws, oracle_analyzer):
+    """A noisy occupancy map can stack several indexed lines within a few pixels (seen with an
+    undertrained model). The guidance must not call that a high-confidence lattice."""
+    ws.save_device(DeviceConfig(name="sim", safe_limits={}, max_step=10.0))
+    rng = np.random.default_rng(21)
+    for _ in range(300):
+        s = generate_sample(rng, mix=(0, 1, 0))
+        t = s["truth"]
+        if not (t["status"] == schema.NOT_IN_WINDOW and t["ref_a"] and t["ref_b"]):
+            continue
+        scan = _scan_from_sample(s)
+        pred = truth_to_prediction(s["render"], t, s["window"])
+        oracle_analyzer.register(scan.id, pred)
+        base = analyze(ws, scan)["recommendation"]
+        if base["confidence"] == "high":
+            break
+    else:
+        raise AssertionError("no anchored NOT_IN_WINDOW sample found")
+    # corrupt dot a: after its first transition, three more lines follow 1-2 px apart
+    na = pred["occ_a_p"].argmax(0)
+    S = na.shape[0]
+    bad = np.zeros_like(na)
+    for j in range(S):
+        first = np.argmax(na[j] > 0) if (na[j] > 0).any() else S
+        for k, off in enumerate((0, 2, 3, 5)):
+            bad[j, min(S, first + off):] = k + 1
+    corrupt = dict(pred, occ_a_p=np.stack([(bad == k) for k in range(5)]).astype(float))
+    scan2 = _scan_from_sample(s)
+    oracle_analyzer.register(scan2.id, corrupt)
+    res = analyze(ws, scan2)
+    rec = res["recommendation"]
+    assert rec["confidence"] == "medium", rec
+    assert any("inconsistent" in w for w in rec["warnings"])
+    assert rec["spacing_source"][scan2.x_gate] != "measured in this scan"
+    assert res["lattice_v"]["spacing"][scan2.x_gate] is None      # keeps device history clean
+    # the target still sits about one cell spacing from the first transition, not 1 px
+    sa = rec["spacing_v"][scan2.x_gate]
+    assert abs(rec["target"][scan2.x_gate] - base["target"][scan2.x_gate]) < 0.5 * sa

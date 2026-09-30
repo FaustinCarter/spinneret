@@ -151,8 +151,9 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
         r = v / cfg.spacing(gate)
         return 0.4 <= r <= 2.5
 
-    def spacing(fam: str, gate: str, d: float) -> tuple[float | None, str]:
-        s_idx = lattice[fam]["spacing"]
+    def spacing(fam: str, gate: str, d: float, use_measured: bool = True
+                ) -> tuple[float | None, str]:
+        s_idx = lattice[fam]["spacing"] if use_measured else None
         if s_idx and plausible(s_idx * d, gate):
             return s_idx * d, "measured in this scan"
         if s_idx:
@@ -207,17 +208,16 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
         M = cfg.sensor_gate
         if reason == "low_snr":
             rec["headline"] = "Too noisy to read. Improve the signal, then rescan the same window."
-            steps += ["Check the sensor sits on the steepest flank of its Coulomb peak "
-                      f"(spinQICK: retune_dcs('{M}', ..., set_v=True)).",
+            steps += [f"Check the sensor ({M}) sits on the steepest flank of its Coulomb peak; "
+                      "retune it if it has drifted.",
                       "Average longer: noise falls as 1/sqrt(time), so 4x the integration time "
                       "halves it."]
         elif reason == "sensor_insensitive":
             rec["headline"] = ("The charge sensor has lost sensitivity. Retune it, then rescan "
                                "the same window.")
-            steps += [f"Sweep {M} across its Coulomb peak and park it on the steepest flank "
-                      f"(spinQICK: retune_dcs('{M}', m_range, measure_buffer, set_v=True)).",
-                      f"Make sure the plunger sweep compensates on {M} "
-                      f"(gvg_dc(..., compensate='{M}')).",
+            steps += [f"Sweep {M} across its Coulomb peak and park it on the steepest flank.",
+                      f"If your setup supports it, compensate the plunger sweep on {M} so the "
+                      "sensor stays on the flank.",
                       "If the window spans many electrons, the sensor drifts as the dots fill; "
                       "a smaller window keeps it on the flank."]
         elif reason == "dots_merged":
@@ -290,15 +290,49 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
             return explore_frac * (S - 1), 1.0, "toward more electrons (no transition yet)"
         return 0.0, 1.5, "wider range (this dot's transitions are not in view)"
 
+    def indexed_lines_consistent(lat: dict, s_i: float | None) -> bool:
+        """Anchored lines must be about one spacing apart. A noisy occupancy map can yield
+        several indexed lines stacked within a few pixels; a target built on them is wrong."""
+        idx = sorted((l["index"], l["c"]) for l in lat["lines"] if l["index"] is not None)
+        if not s_i:
+            return True
+        return all(c2 - c1 >= 0.4 * s_i * (k2 - k1)
+                   for (k1, c1), (k2, c2) in zip(idx, idx[1:]))
+
+    def lowest_line_only(lat: dict) -> dict:
+        idx = [l for l in lat["lines"] if l["index"] is not None]
+        return {**lat, "lines": [min(idx, key=lambda l: l["index"])]}
+
+    ok_a = st_a != "anchored" or indexed_lines_consistent(la, sa_i)
+    ok_b = st_b != "anchored" or indexed_lines_consistent(lb, sb_i)
+    for ok, fam, gate, d in ((ok_a, "a", xg, dxv), (ok_b, "b", yg, dyv)):
+        if not ok:
+            v, src = spacing(fam, gate, d, use_measured=False)
+            rec["spacing_v"][gate], rec["spacing_source"][gate] = v, src
+            warnings.append(f"The transitions of the {gate} dot are inconsistent (lines closer "
+                            "together than an electron spacing), so the target uses only the "
+                            f"first transition and a typical spacing ({src}). Check the result "
+                            "after the next scan.")
+    sa_v, sa_src = rec["spacing_v"][xg], rec["spacing_source"][xg]
+    sb_v, sb_src = rec["spacing_v"][yg], rec["spacing_source"][yg]
+    sa_i = sa_v / dxv if sa_v else None
+    sb_i = sb_v / dyv if sb_v else None
+
     notes = []
-    ta = anchored_target(la, sa_i) if st_a == "anchored" else None
-    tb = anchored_target(lb, sb_i) if st_b == "anchored" else None
+    ta = anchored_target(la if ok_a else lowest_line_only(la), sa_i) if st_a == "anchored" \
+        else None
+    tb = anchored_target(lb if ok_b else lowest_line_only(lb), sb_i) if st_b == "anchored" \
+        else None
     if ta and tb:
         A, ma = ta
         B, mb = tb
         i_t = (A + ma * (B - mb * ic - jc)) / (1 - ma * mb)
         j_t = B + mb * (i_t - ic)
-        confidence, basis = "high", "lattice fitted to anchored transitions"
+        if ok_a and ok_b:
+            confidence, basis = "high", "lattice fitted to anchored transitions"
+        else:
+            confidence = "medium"
+            basis = "first anchored transitions and the typical electron spacing"
         wf_a = wf_b = 1.0
     else:
         confidence, basis = "medium" if (ta or tb) else "low", "exploration"

@@ -250,7 +250,7 @@ pages.review = {
         this.side));
     this.empty = h("div", { class: "panel empty", hidden: true },
       h("h2", {}, "No scans yet"),
-      h("p", {}, "Import scans from spinQICK (.nc) or other files on the Scans page, or start a practice device to try the whole loop on a simulated triple dot."),
+      h("p", {}, "Import scan files on the Scans page, send scans from your measurement setup through the ChargeCell API, or start a practice device to try the whole loop on a simulated triple dot."),
       h("div", { class: "row" },
         h("a", { class: "button primary", href: "#/scans" }, "Import scans"),
         h("button", { onclick: () => startPractice() }, "New practice device")));
@@ -399,8 +399,7 @@ pages.review = {
             const txt = `${win.x_gate}: ${V4(win.x[0])} to ${V4(win.x[1])} V, ${win.x[2]} points\n${win.y_gate}: ${V4(win.y[0])} to ${V4(win.y[1])} V, ${win.y[2]} points`;
             navigator.clipboard.writeText(txt).then(() => toast("Scan settings copied"));
           } }, "Copy settings"),
-          h("a", { class: "button", href: `/api/scans/${encodeURIComponent(this.id)}/export/spinqick.py?window=${key}` }, "spinQICK script"),
-          h("a", { class: "button", href: `/api/scans/${encodeURIComponent(this.id)}/export/next_scan.json?window=${key}` }, "JSON"),
+          h("a", { class: "button", href: `/api/v1/scans/${encodeURIComponent(this.id)}/response?download=true`, title: "The result in the chargecell/1 format your measurement code can read" }, "Download result (JSON)"),
           meta.source === "virtual_device" && rec.next_window ? h("button", { class: "primary", onclick: e => this.runNext(e) }, "Measure it on the practice device") : null));
     }
     if (rec.warnings && rec.warnings.length) todo.append(h("div", { style: "margin-top:10px" }, rec.warnings.map(w => h("p", { class: "warn" }, w))));
@@ -802,12 +801,12 @@ pages.scans = {
   buildImport() {
     const f = {};
     const field = (label, el, key) => { f[key] = el; return h("label", {}, label, el); };
-    const files = h("input", { type: "file", multiple: true, accept: ".nc,.npz,.json,.csv,.txt,.dat,.tsv" });
+    const files = h("input", { type: "file", multiple: true, accept: ".npz,.json,.csv,.txt,.dat,.tsv" });
     const result = h("div", { class: "small" });
     const panel = h("div", { class: "panel stack", style: "margin-bottom:14px" },
       h("h2", { style: "margin:0" }, "Import scans"),
       h("p", { class: "small muted", style: "margin:0" },
-        "spinQICK files (.nc from gvg_dc or gvg_baseband) carry their own gate names and voltages. For other files, say which gates were swept. Matrix CSV: first row = x voltages, first column = y voltages. Or three columns x, y, signal."),
+        "ChargeCell request files (.json in the chargecell/1 format) carry their own gate names and voltages. For other files, say which gates were swept. Matrix CSV: first row = x voltages, first column = y voltages. Or three columns x, y, signal."),
       files,
       h("div", { class: "fields" },
         field("X gate (horizontal)", h("input", { placeholder: "e.g. P1" }), "x_gate"),
@@ -843,7 +842,7 @@ pages.scans = {
     this.filterBar.replaceChildren(
       sel("device", [["", "All devices"], ...devices.map(d => [d, d])], "Device"),
       sel("labelled", [["", "All"], ["yes", "Labelled"], ["no", "Not labelled"]], "Label"),
-      sel("source", [["", "All sources"], ["spinqick", "spinQICK"], ["file", "Other files"], ["virtual_device", "Practice devices"]], "Source"),
+      sel("source", [["", "All sources"], ["api", "Sent by API"], ["file", "Other files"], ["virtual_device", "Practice devices"]], "Source"),
       h("span", { class: "muted small" }, `${S.scans.length} scans`));
     this.renderTable();
   },
@@ -865,7 +864,7 @@ pages.scans = {
           h("td", {}, when(s.created), h("div", { class: "id" }, shortId(s.id))),
           h("td", {}, `${s.x_gate} / ${s.y_gate}`, h("div", { class: "id" }, `${(s.shape || [])[1]} x ${(s.shape || [])[0]}`)),
           h("td", {}, s.device, s.cooldown ? h("div", { class: "id" }, s.cooldown) : null),
-          h("td", {}, { spinqick: "spinQICK", file: "file", virtual_device: "practice", synthetic: "synthetic" }[s.source] || s.source),
+          h("td", {}, { api: "API", file: "file", virtual_device: "practice", synthetic: "synthetic" }[s.source] || s.source),
           h("td", {}, l && l.status ? h("span", { class: `pill ${l.status}` }, SHORT_STATUS[l.status]) : h("span", { class: "muted" }, "none"),
             l && l.annotator ? h("div", { class: "id" }, l.annotator) : null),
           h("td", {}, a ? [h("span", { class: `pill ${a.status}` }, SHORT_STATUS[a.status]), " ", h("span", { class: "muted small" }, pct(a.confidence || 0)),

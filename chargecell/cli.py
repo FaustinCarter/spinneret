@@ -3,8 +3,9 @@
     chargecell serve      start the GUI (opens a browser)
     chargecell simulate   generate a synthetic dataset
     chargecell train      train a model version
-    chargecell analyze    analyse scan files and print the decision and guidance
+    chargecell analyze    analyse scan files (or chargecell/1 request files) and print the result
     chargecell navigate   test the guidance on simulated practice devices
+    chargecell schema     print the JSON Schema of the chargecell/1 request and response
 """
 from __future__ import annotations
 
@@ -72,28 +73,50 @@ def cmd_train(a) -> None:
 
 
 def cmd_analyze(a) -> None:
+    from . import protocol
     from .analysis.decide import analyze
     from .importers.generic import load_any
     from .storage import Workspace
 
     ws = Workspace(a.workspace)
     _install_bundled_model(ws)
+    out_dir = Path(a.out) if a.out else None
+    if out_dir:
+        out_dir.mkdir(parents=True, exist_ok=True)
     for f in a.files:
-        scan = load_any(f, meta={"x_gate": a.x_gate, "y_gate": a.y_gate, "device": a.device,
-                                 "cooldown": a.cooldown})
-        if a.save:
-            ws.save_scan(scan)
-        res = analyze(ws, scan)
-        if a.save:
-            ws.save_analysis(scan.id, res)
-        rec = res["recommendation"]
-        print(f"\n{f}: {res['status']} ({res['reason']}), confidence {res['confidence']:.2f}"
-              f"{', NEEDS REVIEW' if res['needs_review'] else ''}")
-        print(f"  {rec.get('headline')}")
-        for s in rec.get("steps", []):
+        f = Path(f)
+        obj = json.loads(f.read_text()) if f.suffix.lower() == ".json" else None
+        if protocol.is_request(obj):
+            req = protocol.parse_request(obj)
+            if a.device != "default":
+                req.scan.device = a.device
+            req.options.save = a.save
+            resp = protocol.handle_analyze(ws, req)
+        else:
+            scan = load_any(f, meta={"x_gate": a.x_gate, "y_gate": a.y_gate, "device": a.device,
+                                     "cooldown": a.cooldown})
+            res = analyze(ws, scan)
+            if a.save:
+                ws.save_scan(scan)
+                ws.save_analysis(scan.id, res)
+            resp = protocol.response_from_analysis(res, ws.get_device(scan.device))
+        if out_dir:
+            (out_dir / f"{f.stem}.response.json").write_text(resp.model_dump_json(indent=2))
+        if a.json:
+            print(resp.model_dump_json(indent=2))
+            continue
+        print(f"\n{f}: {resp.outcome} - {resp.status} ({resp.reason}), confidence "
+              f"{resp.confidence:.2f}{', NEEDS REVIEW' if resp.needs_review else ''}")
+        print(f"  {resp.headline}")
+        for s in resp.steps:
             print(f"  - {s}")
-        for w in rec.get("warnings", []):
+        for w in resp.warnings:
             print(f"  ! {w}")
+
+
+def cmd_schema(a) -> None:
+    from . import protocol
+    print(json.dumps(protocol.json_schemas(), indent=2))
 
 
 def cmd_navigate(a) -> None:
@@ -151,6 +174,8 @@ def main(argv=None) -> None:
     s.add_argument("--device", default="default")
     s.add_argument("--cooldown", default="")
     s.add_argument("--save", action="store_true", help="also store the scans in the workspace")
+    s.add_argument("--json", action="store_true", help="print chargecell/1 responses as JSON")
+    s.add_argument("--out", default=None, help="write <name>.response.json files to this folder")
     s.set_defaults(fn=cmd_analyze)
 
     s = sub.add_parser("navigate", help="evaluate guidance on simulated devices")
@@ -158,6 +183,9 @@ def main(argv=None) -> None:
     s.add_argument("--max-scans", type=int, default=8)
     s.add_argument("--seed", type=int, default=0)
     s.set_defaults(fn=cmd_navigate)
+
+    s = sub.add_parser("schema", help="print the chargecell/1 JSON Schema")
+    s.set_defaults(fn=cmd_schema)
 
     a = p.parse_args(argv)
     a.fn(a)

@@ -3,10 +3,7 @@ import json
 import numpy as np
 
 from chargecell import labels, schema
-from chargecell.config import DeviceConfig
-from chargecell.export import spinqick_snippet
 from chargecell.importers.generic import load_any
-from chargecell.importers.spinqick_nc import load_spinqick_nc, write_mock_spinqick_nc
 from chargecell.simulate.generator import generate_sample
 from chargecell.simulate.physics import DeviceParams, classical_ground_state
 
@@ -61,23 +58,6 @@ def test_annotation_unknown_offset_is_ignored():
     assert d["occ_a"][:, 0].max() == 0 and d["occ_a"][:, -1].min() == 1 and d["ref_a"]
 
 
-def test_spinqick_netcdf_import(tmp_path):
-    nx, ny = 30, 20
-    x = np.linspace(0.80, 0.86, nx)
-    y = np.linspace(0.81, 0.85, ny)
-    sig = np.add.outer(np.arange(ny) * 100.0, np.arange(nx))       # signal[iy, ix] = 100 iy + ix
-    for raw_only in (False, True):
-        f = tmp_path / f"123_gvg_dc_{raw_only}.nc"
-        write_mock_spinqick_nc(f, sig, x, y, "P1", "P2", {"P1": 0.83, "P2": 0.83, "P3": 0.85},
-                               raw_only=raw_only)
-        scan = load_spinqick_nc(f, device="dev", cooldown="CD1")
-        assert scan.x_gate == "P1" and scan.y_gate == "P2" and scan.fast_axis == "y"
-        assert scan.shape == (ny, nx)
-        np.testing.assert_allclose(scan.signal, sig, rtol=1e-5)
-        np.testing.assert_allclose(scan.x, x, rtol=1e-6)
-        assert scan.voltage_state["P3"] == 0.85 and scan.source == "spinqick"
-
-
 def test_generic_importers(tmp_path):
     x = np.linspace(0.8, 0.9, 5)
     y = np.linspace(0.7, 0.75, 4)
@@ -103,17 +83,3 @@ def test_generic_importers(tmp_path):
     (tmp_path / "a.json").write_text(json.dumps({"signal": sig.tolist(), "x": x.tolist(),
                                                  "y": y.tolist(), "x_gate": "P1"}))
     assert load_any(tmp_path / "a.json").x_gate == "P1"
-
-
-def test_spinqick_snippet_steps_and_calls():
-    from chargecell.schema import Scan
-    scan = Scan(signal=np.zeros((10, 10)), x=np.linspace(0.8, 0.9, 10),
-                y=np.linspace(0.8, 0.9, 10), x_gate="P1", y_gate="P2",
-                voltage_state={"P1": 0.85, "P2": 0.85})
-    ana = {"status": "NOT_IN_WINDOW", "reason": "no_reference", "recommendation": {
-        "headline": "h", "warnings": [], "move": {},
-        "next_window": {"x_gate": "P1", "y_gate": "P2", "x": [0.70, 0.76, 80], "y": [0.80, 0.86, 80]}}}
-    code = spinqick_snippet(scan, ana, DeviceConfig(max_step=0.05))
-    assert "set_dc_voltage_compensate" in code and "gvg_dc(" in code
-    assert "range(1, 3 + 1)" in code            # 0.12 V move in steps of <= 0.05 V
-    compile(code.replace("te.", "te_").replace("MEASURE_BUFFER_US", "1"), "snippet", "exec")
