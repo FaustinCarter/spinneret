@@ -5,7 +5,9 @@
 
 Needs: pip install playwright && python -m playwright install chromium
 Does: creates two practice devices if the workspace has no scans; analyses one (if a model is
-active) so the Review page shows overlays; screenshots every page; draws an A and a B boundary
+active) so the Review page shows overlays; screenshots every page; for each scan kind with an
+active model, creates a practice device, analyses it, follows the advice once on the practice
+device and screenshots the Review page (review_<kind>_1.png, _2.png); draws an A and a B boundary
 in the labeller with real mouse input, sets counts and outcome, saves, and checks the saved
 annotation through the API. Prints browser console errors (an expected 404 is filtered out).
 Look at the PNGs: layout problems do not show up as errors.
@@ -47,6 +49,23 @@ async def run(url: str, out: Path) -> None:
             await pg.goto(f"{url}/#/{name}/{sid}" if name in ("review", "label") else f"{url}/#/{name}")
             await pg.wait_for_timeout(1500)
             await pg.screenshot(path=str(out / f"{name}.png"), full_page=True)
+
+        # every scan kind with a model: analyse a practice scan, follow the advice once
+        active = api(url, "/api/status").get("active_models", {})
+        for kind in active:
+            k_sid = api(url, "/api/virtual", "POST", {"kind": kind, "seed": 11})["scan_id"]
+            for step in (1, 2):
+                res = api(url, f"/api/scans/{k_sid}/analyze", "POST")
+                await pg.goto(f"{url}/#/review/{k_sid}")
+                await pg.wait_for_timeout(1500)
+                await pg.screenshot(path=str(out / f"review_{kind}_{step}.png"), full_page=True)
+                print(f"{kind} step {step}: {res['status']} / {res['reason']}")
+                rec = res.get("recommendation") or {}
+                key = "next_window" if rec.get("next_window") else "tiebar_window" \
+                    if rec.get("tiebar_window") else None
+                if step == 2 or key is None:
+                    break
+                k_sid = api(url, f"/api/scans/{k_sid}/run_next?window={key}", "POST")["scan_id"]
 
         # labeller interaction, on a fresh (unlabelled) practice scan
         sid = api(url, "/api/virtual", "POST", {})["scan_id"]

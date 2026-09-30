@@ -226,7 +226,7 @@ Everything is computed in the model's index grid and converted to volts at the e
 
 ## 11. Starter models
 
-STARTER_MODEL_RESULTS
+(Pending: filled in once the starter models are trained and evaluated.)
 
 ## 12. Limitations and next steps
 

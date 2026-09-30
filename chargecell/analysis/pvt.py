@@ -169,9 +169,16 @@ def analyze_pvt(ws: Workspace, scan: Scan, model_id: str | None = None,
     needs_review = bool(checks or mi > an.uncertainty_threshold or sp.max() < 0.6)
 
     # keypoints in volts
+    # the clean band is the longest run of good rows; its edges count as T_open / T_broad only
+    # when the rows beyond them are mostly too slow / too open (robust to single noisy rows)
     gb = band(rows, GOOD)
-    j_open = next((j for j in range(1, S) if rows[j] != SLOW and rows[j - 1] == SLOW), None)
-    j_broad = next((j for j in range(1, S) if rows[j] == OPEN and rows[j - 1] != OPEN), None)
+    j_open = j_broad = None
+    if gb is not None:
+        below, above = rows[:gb[0]], rows[gb[1] + 1:]
+        if len(below) and (below == SLOW).mean() > 0.5:
+            j_open = gb[0]
+        if len(above) and (above == OPEN).mean() > 0.5:
+            j_broad = gb[1] + 1
     features, keypoints = [], {}
     for l in lines:
         js = np.linspace(l["j_lo"], l["j_hi"], 8)

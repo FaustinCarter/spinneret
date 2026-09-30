@@ -101,7 +101,7 @@ chargecell navigate --devices 20                                # test guidance 
 
 ## What is validated, and what is not
 
-VALIDATION_RESULTS
+(Pending: filled in once the starter models are trained and evaluated.)
 
 More: `docs/OPERATOR_GUIDE.md` (plain-language guide), `docs/DESIGN.md` (how it works),
 `docs/PROTOCOL.md` (integration), `docs/CODEMAP.md` (developer reference),

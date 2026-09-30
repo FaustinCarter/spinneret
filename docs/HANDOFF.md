@@ -1,239 +1,159 @@
-# Handoff: state of ChargeCell at the end of the first build
+# Handoff: state of ChargeCell
 
-Written 2026-09-29 by the Claude session that built ChargeCell (claude.ai, sandboxed Linux with one
-CPU and 3 GB RAM). It is for the next Claude session working in Claude Code without the original
-conversation. Read this first, then `docs/CODEMAP.md` before changing code.
+Updated 2026-09-30 by the second Claude session (Claude Code, cloud container with 4 CPU cores,
+15 GB RAM, no GPU). The first build (2026-09-29, claude.ai sandbox) is summarised in section 1.
+Read this first, then `docs/CODEMAP.md` before changing code.
 
 ## 1. What the user asked for
 
-The user (works with Si/SiGe exchange-only (EO) spin-qubit devices in HRL Laboratories' style)
-asked for, in order:
+The user works with Si/SiGe exchange-only (EO) spin-qubit devices in HRL Laboratories' style.
 
-1. A system that looks at a double-quantum-dot charge stability diagram and either **detects
-   the (1,1) charge cell**, or says **(1,1) is not in the data window**, or says **the window is not
-   interpretable**.
-2. A reading of HRL's exchange-only qubit papers (summarised in `docs/RESEARCH_NOTES.md`).
-3. A full build. The request in the user's words, condensed:
-   - use spinQICK "as suggested" to generate synthetic training data;
-   - an easy annotation pipeline so human experts can label real data;
-   - a training pipeline;
-   - state-of-the-art open-source AI models only where they add clear, obvious value;
-   - a GUI usable by someone who is not a software engineer (label data, generate synthetic data,
-     run the pipeline, review outputs, etc.);
-   - feedback that tells the operator how to move the voltage knobs and rescan when the
-     interesting region is not in the window;
-   - anything else an expert would consider obvious.
-4. Package everything for a GitHub repo and Claude Code, with instructions for the next session
-   (this document).
+**First session (2026-09-29):** a system that looks at a double-quantum-dot charge stability
+diagram and either finds the (1,1) cell, says it is not in the window, or says the window is not
+interpretable; a reading of HRL's EO papers; a full build (simulated training data, easy expert
+annotation, training pipeline, a GUI for non-programmers, next-scan guidance, open-source models
+only where they clearly help); packaging for GitHub and Claude Code.
 
-**Correction already given to the user:** spinQICK (github.com/HRL-Laboratories/spinqick) has no
-device simulator. It was cloned and checked; its only "simulation" is MESA forecasting. The
-earlier research summary had said spinQICK could be used "to generate real training data in
-HRL-style formats", meaning real measurements, and the user read that as synthetic generation.
-ChargeCell therefore uses spinQICK for **real-data import** (netCDF) and **next-scan export**
-(a script calling its API). Synthetic data comes from ChargeCell's own simulator. Keep this
-framing consistent in docs and replies.
+**Second session (2026-09-30), in the user's words or close to them:**
+- Unpack the project into the empty `spinneret` repository and continue (the package keeps the
+  name ChargeCell).
+- "Remove spinQICK entirely": spinQICK has no simulator. Instead, "a generic format for any
+  backend to send in data for analysis or training and receive a response that includes either
+  coordinates for (1,1) cell, tie-bar, etc. or instructions for where to scan next, or an
+  indicator that the image wasn't able to generate a next step with any confidence."
+  → the chargecell/1 protocol (`docs/PROTOCOL.md`).
+- "Generate some simulated data for now" (no real data yet); read the literature for
+  representative EO data.
+- "The protocols should be agnostic to actual voltages as those will vary widely based on device
+  and technology." → no voltage scale anywhere (DECISIONS 16).
+- Gate names follow the HRL convention: P1, P2, ... plungers; X1, X2, ... exchange gates (T
+  tunnel gates and M sensors as in HRL's papers).
+- "Let's do the PvT tie-bar models next." → done (DESIGN sections 8, 9).
 
-**Foundation models were deliberately not used** (no SAM, pretrained backbones, or VLMs). The
-reasoning is in `docs/DESIGN.md` §5 and `docs/DECISIONS.md`. Don't add one without a measured gain.
+Answers to the first session's open questions: keep the name ChargeCell; train here on CPU
+(PvP at 96 px, 3 members); bundled weights in **Git LFS**; **no license** for now; acceptance bar
+as proposed (FOUND precision ≥ 0.95 on held-out synthetic data; closed loop finds the goal on
+≥ 70% of practice devices with no wrong FOUND); **advisory only** (ChargeCell never moves gates);
+priorities after PvT/tie-bar: the **automation tree / audit log**. Spectator verification and
+hole-device labelling were not chosen.
+
+**Foundation models are still deliberately not used** (DESIGN section 5, DECISIONS 6).
 
 ## 2. Status summary
 
 | Area | State |
 |---|---|
-| Physics simulator + oracle labels | Done, tested |
-| Annotation format, dense labels, round trip | Done, tested (~99% pixel agreement) |
-| U-Net ensemble, training, calibration, model cards | Done; smoke-tested; **no finished starter model** |
-| Inference, decision gates, lattice, guidance | Done; guidance validated with oracle perception |
-| spinQICK importer / generic importers / exporter | Done; tested on mock files only |
-| Practice (virtual) devices, navigation evaluation | Done |
-| FastAPI server (all GUI endpoints), job runner | Done, API-tested |
-| GUI (6 pages) | Done; browser-tested except the pages that need a model (see §4.2) |
-| CLI | Done (`serve`, `simulate`, `train`, `analyze`, `navigate`) |
-| Tests | 13 passing (`pytest -q`, ~40 s on 1 CPU) |
-| Docs | README, OPERATOR_GUIDE, DESIGN, CODEMAP, RESEARCH_NOTES, DECISIONS, this file |
-| Starter model bundled in the package | **Not done** (§4.1) |
-| CI workflow | Written, **never run** (§4.6) |
+| chargecell/1 protocol (HTTP, files, Python client), spinQICK removed | Done, tested |
+| Voltage-agnostic settings and guidance | Done, tested (random-scale practice devices) |
+| PvP simulator, labels, model, decision, guidance | Done; anchoring and demotion fixed after evaluating the first model |
+| PvT simulator, model, analysis, guidance | Done; see section 3 for the trained model |
+| Tie-bar simulator, model, analysis (measured coupling), guidance | Done; see section 3 |
+| Practice devices with P, X, T gates; closed-loop evaluation per kind | Done |
+| GUI: kinds, practice per kind, keypoint display | Done; labeller is PvP-only |
+| Starter models bundled (Git LFS) | In progress (PvP retraining; PvT and tie-bar next) |
+| CI (GitHub Actions) | Green on every push this session |
+| Automation tree / audit log | Not started (next on the user's list) |
 
 ## 3. Verified results (reproducible)
 
-- `pytest -q`: 13 passed. Covers simulator consistency, label round trip, unknown-offset
-  handling, spinQICK netCDF import (analysed and raw-IQ), spinQICK upload through the HTTP import endpoint, generic importers (matrix CSV in mV,
-  long CSV, npz, json), spinQICK script generation (step splitting, compiles), the full HTTP
-  workflow the GUI uses, and a tiny end-to-end training run.
-- Guidance with perfect perception (`python scripts/nav_trace.py --oracle --bench`): 30/30
-  random practice devices reach the correct (1,1) cell, median 2.5 scans, 90th percentile 4.
-- `tests/test_guidance.py` thresholds: status agreement > 90%; anchored target error median
-  < 0.3 cell spacings; correct move direction > 80% when unanchored; navigation ≥ 5/6.
-- GUI: `python scripts/gui_check.py` against a running server. It screenshots all pages, drives
-  the labeller with real mouse and keyboard input, and checks the annotation round trip. Last
-  run: OK, no console errors.
-- Starter model, partial (the run was killed by the sandbox before finishing). Settings: 4000
-  synthetic scans at 64 px, base 16, 8 epochs, about 108 s/epoch on 1 CPU. Member 0 validation
-  status accuracy by epoch: 0.55, 0.52, 0.63, –, 0.67, 0.69, 0.72, 0.72. Per-pixel occupancy
-  accuracy rose from 0.63 to 0.77. Member 1 reached 0.65 at epoch 4 when killed. **These are
-  modest numbers.** The FOUND threshold calibration and review flags exist because of this.
+- `pytest -q`: 24 tests (about 3 minutes on 4 cores; `test_kinds.py` trains tiny models).
+- Guidance with perfect perception, 30 practice devices each (`python scripts/nav_trace.py
+  --oracle --bench --kind <kind>`), every FOUND correct: PvP 30/30 (median 3 scans; 30/30 also
+  with `--no-prior`), PvT 30/30 (median 2; half the devices start with the tunnel gate too
+  closed; 30/30 with `--no-prior`), tie bar 30/30 (median 1).
+- Tie-bar coupling measurement: the fitted interdot width is within 35% of the physics
+  (`test_tiebar_width_is_measured_from_the_signal`).
+- Trained starter models (`scripts/eval_model.py`, fresh held-out scans, seed 2027; closed loop
+  on 20 practice devices):
+
+(Pending: filled in once the starter models are trained and evaluated.)
+
+- First PvP model of this session (96 px, 3 x 12 epochs, 4000 scans, old labels), for the
+  record: FOUND precision 0.97 but recall 0.27, closed loop 5/20 with one wrong FOUND. The
+  failures led to DECISIONS 17 and 18.
 
 ## 4. Unfinished work, in priority order
 
-### 4.1 P0: Train, evaluate, and bundle the starter model
+### 4.1 P1: Automation tree / audit log (the user's next priority)
 
-`cli.py serve` installs any model found in `chargecell/assets/models/<id>/` into an empty
-workspace (`_install_bundled_model`). Nothing is there yet, so a new user must train first.
-The README and OPERATOR_GUIDE were written as if a starter model ships; see step 5.
+HRL records every tune-up action (data collection, analysis, decision) as a node of a tree,
+graded when it runs, and mines trees across runs for success rates and failure modes (QPU paper,
+S5.3). Suggested shape for ChargeCell, which stays advisory:
+- a `runs/<id>.json` tree in the workspace: nodes {kind: scan | analysis | decision | operator
+  action, request_id, scan_id, parent, grade (ok / needs_review / failed), summary, time};
+- the protocol's `request_id` (and a new optional `run_id` / `parent_id` in `options`) links a
+  backend's requests into a tree without ChargeCell driving anything;
+- a GUI page to browse a run (depth-first order, grades, the scan and result at each node) and
+  simple statistics across runs (scans to FOUND per kind, where runs stall).
+The practice devices' closed loops (`virtual.evaluate`) are the natural first producer of trees.
 
-1. `python scripts/train_starter.py --workers <cores-1> --bundle`. Consider `--size 96
-   --epochs 12 --ensemble 3` if hardware allows; the defaults reproduce the interrupted run.
-   Run it in the foreground or under `nohup`. In the claude.ai sandbox, background processes
-   were killed whenever the conversation paused, twice. Check how Claude Code behaves before
-   relying on long background jobs.
-2. `python scripts/eval_model.py --model-dir starter_ws/models/<id>`. It reports held-out
-   decision accuracy, FOUND precision and recall, the review rate, and closed-loop navigation
-   with the real model.
-3. Acceptance bar (proposed; confirm with the user): FOUND precision ≥ 0.95 on held-out
-   synthetic data (the calibration targets 0.97); navigation finds (1,1) on ≥ 70% of devices
-   with no wrong FOUND. If precision fails, raise `target_precision`, train longer, or use 96 px.
-   If navigation stalls, trace it with `scripts/nav_trace.py --model-dir ...`; perception errors
-   in the anchor heads (`ref`) and noisy occupancy maps are the likely causes (see the first
-   item in §5, which should be fixed before judging the navigation numbers).
-4. Fill `docs/DESIGN.md` §9 (placeholder text `STARTER_MODEL_RESULTS`) and the "What is
-   validated" section of `README.md` with the measured numbers.
-5. Check the README's claims ("A starter model trained on simulated data is installed on first
-   start"; quick-start step 1 analyses without training) against reality after bundling.
-6. Model files are about 8 MB per member at base 16. Fine for git at this size. See open
-   question Q5 about LFS or Releases.
+### 4.2 P1: Keypoint labels for PvT and tie-bar scans
 
-### 4.2 P0: Visually verify the GUI with a model active
+The labeller draws PvP labels only. Real PvT and tie-bar data need keypoint labels: loading
+lines (polylines) + first index + the clean tunnel-gate range for PvT; triple points and the
+tie bar for tie-bar scans. Then `model/dataset.real_arrays` needs a per-kind conversion to the
+dense heads (as the simulators do), and the protocol `Label` an optional per-kind keypoint block.
 
-Never seen in a browser because no model existed:
+### 4.3 P1: Real data
 
-- the Review page with an analysis: occupancy overlay, (n,m) labels, lines layer, FOUND polygon,
-  centre cross, readout diamond, dashed next-window box, arrow, target ring, decision panel,
-  "Model details";
-- the Train page with a running job (progress, loss chart) and model cards (metrics,
-  confusion matrix);
-- Synthetic data previews (thumbnails);
-- "Measure it on the practice device" chaining to the next scan;
-- "Accept as label" and "Correct in labeller".
+No real data yet (the user asked to work on simulations for now). When scans arrive: label from
+at least two cooldowns, retrain with `use_real` on, compare real-data metrics; tune the simulator
+presets (line widths, sensor drift, noise, tunnel-rate ranges) against real scans; check the
+tie-bar coupling ratio against independent tunnel-coupling measurements.
 
-After 4.1: start the server on a demo workspace, run `scripts/gui_check.py`, open the PNGs,
-then click through the practice loop manually (Playwright scripts are fine). Things to check:
-overlays align with the data for hole devices (`drawGridImage` with a negative dx), the arrow
-direction, and that the view zooms out to include the next window.
+### 4.4 P2: Extensions
 
-### 4.3 P1: Validate spinQICK integration on real files and the installed version
+- Readout calibration after the tie bar (HRL's spin-to-charge histogram step, Fig. S20f).
+- PvT for interior dots (loaded through neighbours, no own reservoir) and a tie bar for
+  (1,1)-(0,2) without swapping axes.
+- Spectator verification as a status, cross-pair consistency (not chosen by the user yet).
+- Hole-device labelling conventions (analysis already handles holes).
+- Simulator realism: compare with QDarts / qarray; reservoir-starved interior dots.
 
-- The importer follows `SpinqickData.save_data` as read from spinQICK's source (details in
-  RESEARCH_NOTES §3). It was only tested on files written by `write_mock_spinqick_nc`. Ask the
-  user for a few real `.nc` files (gvg_dc and gvg_baseband) and their spinQICK version.
-- The generated script uses `te.vdc.get_dc_voltage`, `te.vdc.set_dc_voltage_compensate(volts,
-  gates, iso_gates)` (absolute volts; requires a cross-coupling matrix in the hardware config)
-  and `te.gvg_dc(g_gates=..., g_range=..., measure_buffer=..., compensate=...)` (ranges relative
-  to the DC point). Verify these signatures against the user's installed spinQICK.
-- `MEASURE_BUFFER_US` is left as a placeholder the user must fill. Consider reading it from the
-  scan's saved `cfg` attribute instead (stored as JSON in the netCDF root).
+### 4.5 P3: Housekeeping
 
-### 4.4 P1: Model quality on real data
-
-Real performance is unknown until the user labels scans from ≥ 2 cooldowns. Real metrics appear
-in model cards only when a held-out real split exists (`group_split` by device|cooldown). When
-labels arrive:
-
-- retrain with `use_real` on and compare real-data metrics between versions;
-- look at `needs_review` rates and the label queue ordering;
-- if simulations look unlike the user's data, tune `simulate/generator.py` PRESETS and artefact
-  ranges against real scans (line widths, sensor drift, noise spectra).
-
-### 4.5 P2: Extensions discussed but not built
-
-- **Spectator verification as a status.** The research notes proposed
-  `FOUND_SPECTATOR_UNVERIFIED`. Today spectators are only reported as advice in `spectator_check`.
-  A cross-pair consistency layer (P1–P2, P2–P3, P1–P3 scans) would make (1,1,1) a real verdict.
-- **PvT (plunger-vs-tunnel-gate) and "tiebar" models**, as in HRL's own pipeline (three CNNs:
-  PvT, PvP, tiebar). Reuse the labelling, training, and job infrastructure; add a scan `kind`
-  and per-kind heads or models.
-- **Keypoint-graph output and an automation tree** (HRL-style action log with a grade per
-  node) so tune-up runs can be audited.
-- **Hole-device labelling.** Analysis handles holes (`Grid.for_scan` flips), but the labeller
-  assumes occupancy grows with voltage. `prediction_for_annotation` flips indices for holes, so
-  drafts are consistent. Manual drawing conventions and `labels.relative_occupancy` need a
-  carrier-aware direction.
-- **Simulator realism.** Consider comparing against or adding QDarts / qarray backends.
-  Curved interdot lines at strong coupling are modelled via tunnel coupling. Reservoir-starved
-  interior dots (slow or missing reservoir lines) are not modelled.
-
-### 4.6 P3: Housekeeping
-
-- `.github/workflows/tests.yml` was written but never run. Fix it on the first push if it fails
-  (torch CPU wheel index, Python version).
-- No LICENSE file (open question Q1).
-- `httpx` deprecation warning from Starlette's TestClient; a netCDF4/numpy binary warning in the
-  sandbox (harmless).
+- Starlette's TestClient warns that httpx will be replaced by httpx2.
+- CI does not fetch LFS weights (tests do not need them; saves LFS bandwidth).
 
 ## 5. Known issues and sharp edges
 
-- **Guidance confidence ignores lattice plausibility (open, P1).** Found in the final check with
-  a deliberately untrained model (`train_starter.py -n 48 --size 32 --epochs 1 --ensemble 1
-  --base 8`, then `nav_trace.py --model-dir ...`). Both dots were "anchored", but the noisy
-  occupancy map yielded four stacked indexed lines within about 3 px
-  (`a=[15.9, 17.8, 17.8, 19.3]`), and the recommendation still said `confidence=high`, basis
-  "lattice fitted to anchored transitions". Indexed lines from `_from_occupancy` are not
-  clustered or checked. Proposed fix in `recommend.py`: when both dots are anchored but the
-  indexed-line spacing fails `plausible()` (or lines are closer than ~0.4 of the prior spacing),
-  downgrade to `medium`, compute the target from the prior spacing, and add a warning. Then add
-  an oracle-style unit test that injects a corrupted occupancy map. The FOUND gates were not
-  affected (no false FOUND).
-
-- **Line-map lattice and interdot jogs.** Fitting reservoir segments separately counted each
-  interdot jog as a line, so the spacing came out 3–6x too small and navigation looped with
-  shrinking windows. Fixed by joining segments through the interdot channel
-  (`lattice._from_line_map`), by rejecting spacings more than 2.5x away from the device prior,
-  and by never shrinking a window on an unmeasured spacing. Don't undo these three together.
-- **History pollution.** `lattice_v.spacing` is stored in analyses only when the guidance
-  accepted it as "measured in this scan". `history_spacing` takes the median of those.
-- **Oracle tests re-render without noise.** `OracleAnalyzer` can therefore call FOUND on a scan
-  whose noisy ground truth says `low_snr`. Navigation correctness is judged geometrically
-  (`virtual._found_is_right`), not by comparing status strings.
-- `evaluate_navigation` writes practice devices and device configs into the workspace you pass.
-  Use a scratch workspace (the scripts do).
-- Server: `GET /api/scans/{id}/analysis` returns 404 when not analysed. The Review page avoids
-  the call by checking `scan_summary.analysis` first.
-- Front end: `plot.js` must stay wrapped in an IIFE. Classic scripts share one global lexical
-  scope, so `class Plot` collided with `const { Plot } = window.ChargePlot` in app.js.
-- CSS: `[hidden] { display: none !important }` is required because `.stack`, `.grid-2`, etc.
-  set `display` and would otherwise override the `hidden` attribute.
-- `JobManager` runs one job at a time on a thread. Synthetic generation can still use worker
-  processes inside that job (`workers`).
-- Decision on hard quality failures uses a fixed S = 64 grid for guidance (no model involved).
-- `quality.py` once had a sweep-jump detector; it was removed because it flagged clean scans.
-  Charge jumps are left to the model's `charge_instability` reason.
+- **One heavy job at a time.** On 4 cores, running data generation or the test suite during
+  training slowed epochs from ~90 s to ~13 min (load average 10). Train in the background and do
+  light work meanwhile.
+- **Oracle tests re-render without noise**, so the oracle can call FOUND on a scan whose noisy
+  truth is low_snr; correctness is judged geometrically per kind (`virtual.*_is_right`).
+- **Tie-bar triple points** are located on a fine ground-state map: the spectator can change
+  occupancy right at a triple point when mutual charging is strong, which fixed-spectator
+  formulas get wrong.
+- **PvT orientation**: analysis transposes a scan with the tunnel gate on x; results and overlays
+  carry the analysis's gate order (`analysis.scan`, `overlays.x_gate`), and the GUI maps by gate
+  name.
+- **Practice devices shift with T and X gates** (`virtual.device_state` also moves `v11`); the
+  PvP ground truth uses the shifted device.
+- Earlier items still true: the line-map lattice joins reservoir segments through interdot
+  segments, rejects spacings far from the prior/history, and never shrinks a window on an
+  unmeasured spacing (don't undo these together); only measured spacings are stored in
+  `lattice_v`; `plot.js` stays an IIFE; `[hidden] { display: none !important }` is required;
+  `JobManager` runs one job at a time.
 
 ## 6. Open questions for the user
 
-Ask these rather than guessing:
-
-1. **License**: which one, if any? None was added.
-2. **Real data**: can they share a few spinQICK `.nc` files (with and without (1,1)) and their
-   spinQICK version? Are their scans PvP via `gvg_dc`, or also `gvg_baseband`?
-3. **Device facts**: gate names (P/X/T/M convention?), safe voltage limits, typical addition
-   voltages, electrons or holes, which gate sits between each plunger pair.
-4. **Compute**: where will training run (CPU cores, GPU)? That decides 64 vs 96 px and the
-   ensemble size.
-5. **Model weights in git**: commit bundled weights (~8–25 MB), use Git LFS, or attach them to
-   GitHub Releases?
-6. **Autonomy**: should ChargeCell stay advisory (operator runs the exported script), or
-   eventually run scans in a closed loop through spinQICK? This affects safety design.
-7. **Priorities** among spectator verification, PvT/tiebar models, and hole-device labelling.
-8. **Acceptance criteria** for the starter model (§4.1 step 3 is a proposal).
+1. **Automation tree**: is the shape in 4.1 what you want (ChargeCell records and grades, the
+   backend drives), or should ChargeCell also plan the sequence of scans (PvT → PvP → tie bar)?
+2. **Tie-bar coupling target**: what range of coupling ratio (or t_c in µeV, with lever arms and
+   electron temperature) do you want for readout? Without it ChargeCell only reports.
+3. **Real data**: when available, a few scans of each kind (any format) from two cooldowns.
+4. **Device facts** that are still unknown to ChargeCell: which T gate serves which plunger on
+   your devices, and whether interior dots need their own loading procedure.
 
 ## 7. How to resume
 
 ```bash
-pip install -e ".[dev,spinqick]"          # torch CPU wheel is fine
-pytest -q                                   # expect 13 passed
-python scripts/nav_trace.py --oracle --bench   # expect 30/30, median ~2.5
-python scripts/train_starter.py --bundle    # §4.1
+git lfs install && git lfs pull
+pip install -e ".[dev]"
+pytest -q                                              # expect 24 passed
+python scripts/nav_trace.py --oracle --bench --kind PvP   # and PvT, tiebar: expect 30/30
+chargecell -w /tmp/demo serve --no-browser             # GUI; practice devices on the Scans page
 ```
 
-Then fix the first item in §5 (small, testable), and work through §4 in order. Update this file as items close. Once the starter model is
-bundled and verified, move finished items to a short "Done" list and keep §5 and §6 current.
+Then start on 4.1 (the automation tree).
