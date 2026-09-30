@@ -43,6 +43,12 @@ def create(ws: Workspace, seed: int | None = None, preset: str = "hrl_linear",
     p = sample_device(rng, preset)
     p = scale_voltages(p, float(np.exp(rng.uniform(np.log(0.25), np.log(4.0)))))
     p.latch = np.zeros(3)                 # reservoir speed comes from the tunnel gates
+    # the sensor sits where it can read out the P1-P2 pair (spin-to-charge conversion needs it
+    # to tell (1,1) from (2,0)): it couples clearly more strongly to one of the two dots, as in
+    # the tie-bar training data (separate generator: the rest of the device stays as before)
+    near, far = (0, 1) if p.s_kappa[0] >= p.s_kappa[1] else (1, 0)
+    p.s_kappa[far] = min(p.s_kappa[far],
+                         p.s_kappa[near] * np.random.default_rng([seed, 7]).uniform(0.15, 0.65))
     start = {g: float((p.v11[k] + rng.uniform(-2.5, 3.0) * p.addition_voltage(k)) / 1e3)
              for k, g in enumerate(GATES)}
     start["P3"] = float(p.v11[2] / 1e3)

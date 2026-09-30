@@ -324,6 +324,10 @@ def generate_tiebar_sample(rng: np.random.Generator, preset: str = "mixed",
         retune_sensor(p, w)
     art = sample_artifacts(rng, "normal" if art_kind in ("dots_merged", "resolution_too_coarse")
                            else art_kind)
+    if art.kind == "normal":
+        # a zoom is usually averaged longer than a survey scan (the tie bar is a small signal);
+        # explicit low_snr samples keep their noise
+        art.snr_target *= float(rng.uniform(1.0, 3.0))
     rend = render(p, w, art, rng)
     truth = tiebar_oracle(p, w, art, rend, geo)
     return dict(params=p, window=w, artifacts=art, render=rend, truth=truth, geometry=geo,
