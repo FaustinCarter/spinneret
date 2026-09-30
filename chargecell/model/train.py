@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import platform
+import socket
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Callable
@@ -48,6 +51,50 @@ class TrainConfig:
     target_precision: float = 0.97
     notes: str = ""
     max_minutes: float = 0.0          # optional wall-clock budget per member (0 = none)
+    name: str = ""                    # name shown in the GUI (default: kind and date)
+    device: str = "auto"              # auto (a GPU if there is one), cpu, cuda, cuda:1, mps
+    loader_workers: int = -1          # processes preparing training images (-1: auto)
+
+
+def resolve_device(name: str = "auto") -> torch.device:
+    """The device to train on. ``auto`` takes an NVIDIA GPU (CUDA) if there is one, else an
+    Apple GPU (MPS), else the CPU. Asking for a GPU that is not there is an error."""
+    name = (name or "auto").lower()
+    if name == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    if name.startswith("cuda") and not torch.cuda.is_available():
+        raise ValueError("No NVIDIA GPU is available to this Python (torch.cuda.is_available() "
+                         "is False). Install a CUDA build of PyTorch, or use --device cpu.")
+    if name == "mps" and not (getattr(torch.backends, "mps", None)
+                              and torch.backends.mps.is_available()):
+        raise ValueError("No Apple GPU (MPS) is available. Use --device cpu.")
+    return torch.device(name)
+
+
+def describe_device(dev: torch.device) -> str:
+    if dev.type == "cuda":
+        return f"GPU: {torch.cuda.get_device_name(dev)}"
+    if dev.type == "mps":
+        return "GPU: Apple (MPS)"
+    return f"CPU ({os.cpu_count()} cores)"
+
+
+def _loader_workers(cfg: TrainConfig, dev: torch.device) -> int:
+    if cfg.loader_workers >= 0:
+        return cfg.loader_workers
+    # a GPU is fed faster than one process can prepare images; on a CPU the cores are busy
+    # training, so extra processes only compete with it
+    return 0 if dev.type == "cpu" else max(0, min(6, (os.cpu_count() or 1) - 1))
+
+
+def _seed_worker(worker_id: int) -> None:
+    """Each data-loading process gets its own random augmentations."""
+    info = torch.utils.data.get_worker_info()
+    info.dataset.rng = np.random.default_rng(torch.initial_seed() % 2**32)
 
 
 # weight of line pixels against background: thin, rare families (and the sensor's own
@@ -89,12 +136,18 @@ def _batches_per_epoch(n: int, bs: int) -> int:
 
 
 def train_member(cfg: TrainConfig, train_d: dict, val_d: dict, member: int,
-                 progress: Callable[[dict], None] | None = None) -> tuple[ChargeCellNet, list]:
+                 progress: Callable[[dict], None] | None = None,
+                 dev: torch.device | None = None) -> tuple[ChargeCellNet, list]:
+    dev = dev or torch.device("cpu")
     torch.manual_seed(cfg.seed * 1000 + member)
     spec = kinds.get(cfg.kind)
-    model = ChargeCellNet(base=cfg.base, kind=cfg.kind)
+    model = ChargeCellNet(base=cfg.base, kind=cfg.kind).to(dev)
     ds = CSDDataset(train_d, augment=True, seed=cfg.seed * 1000 + member, kind=cfg.kind)
-    dl = DataLoader(ds, batch_size=cfg.batch_size, shuffle=True, drop_last=len(ds) > cfg.batch_size)
+    nw = _loader_workers(cfg, dev)
+    dl = DataLoader(ds, batch_size=cfg.batch_size, shuffle=True,
+                    drop_last=len(ds) > cfg.batch_size, num_workers=nw,
+                    worker_init_fn=_seed_worker if nw else None, persistent_workers=nw > 0,
+                    pin_memory=dev.type == "cuda")
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=1e-4)
     steps = cfg.epochs * _batches_per_epoch(len(ds), cfg.batch_size)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=cfg.lr, total_steps=steps,
@@ -106,6 +159,7 @@ def train_member(cfg: TrainConfig, train_d: dict, val_d: dict, member: int,
         model.train()
         run = []
         for b in dl:
+            b = {k: v.to(dev, non_blocking=True) for k, v in b.items()}
             out = model(b["x"])
             loss, parts = _loss(out, b, spec)
             opt.zero_grad()
@@ -158,6 +212,7 @@ def predict_batch(models: list, x: torch.Tensor, tta: bool = False) -> dict:
     members. Both are exact in feature space: features(-s) = -features(s), and
     features(s.T) = [z.T, gy.T, gx.T]."""
     spec = models[0].spec
+    x = x.to(next((p.device for p in models[0].parameters()), x.device))
     outs = _forward(models, x)
     if tta:
         outs += _forward(models, -x)
@@ -174,7 +229,7 @@ def predict_batch(models: list, x: torch.Tensor, tta: bool = False) -> dict:
         "ref": torch.stack([o["ref"].sigmoid() for o in outs]).mean(0),
     }
     res["status"] = res["status_members"].mean(0)
-    return res
+    return {k: v.cpu() for k, v in res.items()}
 
 
 def _run(models: list, data: dict, bs: int = 64, gates=None, tta: bool = False) -> dict:
@@ -292,16 +347,24 @@ def full_metrics(models: list, data: dict, threshold: float | None, target: floa
     )
 
 
-def train(ws: Workspace, cfg: TrainConfig, progress: Callable[[float, str, dict], None] | None = None
-          ) -> str:
+def train(ws: Workspace, cfg: TrainConfig, progress: Callable[[float, str, dict], None] | None = None,
+          real: dict | None = None) -> str:
+    """Train a model version into ``ws`` and return its id. ``real``: labelled real scans as
+    arrays, when training from a training-job file on another computer (default: the
+    workspace's own labelled scans)."""
     def say(frac, msg, rec=None):
         if progress:
             progress(frac, msg, rec or {})
 
-    say(0.0, "loading data")
+    dev = resolve_device(cfg.device)
+    t_start = time.time()
+    say(0.0, f"loading data (training on {describe_device(dev)})")
     kinds.get(cfg.kind)
     syn = load_synthetic(ws, cfg.synthetic, cfg.size, cfg.kind) if cfg.synthetic else {}
-    real = real_arrays(ws, cfg.size, cfg.only_reviewed, cfg.kind) if cfg.use_real else {}
+    if real is None:
+        real = real_arrays(ws, cfg.size, cfg.only_reviewed, cfg.kind) if cfg.use_real else {}
+    elif not cfg.use_real:
+        real = {}
     if not syn and not real:
         raise ValueError("No training data: generate a synthetic dataset or label some scans.")
     parts_train, val_sets = [], {}
@@ -328,13 +391,16 @@ def train(ws: Workspace, cfg: TrainConfig, progress: Callable[[float, str, dict]
     for m in range(cfg.ensemble):
         def cb(rec, m=m):
             frac = (m + rec["epoch"] / cfg.epochs) / cfg.ensemble * 0.9
-            say(frac, f"member {m + 1}/{cfg.ensemble}, epoch {rec['epoch']}/{cfg.epochs}", rec)
-        net, hist = train_member(cfg, train_d, val_quick, m, cb)
-        torch.save(net.state_dict(), mdir / f"member_{m}.pt")
+            say(frac, f"network {m + 1} of {cfg.ensemble}, pass {rec['epoch']} of {cfg.epochs}",
+                rec)
+        net, hist = train_member(cfg, train_d, val_quick, m, cb, dev)
+        # saved in CPU form, so the model runs on any computer
+        torch.save({k: v.detach().cpu() for k, v in net.state_dict().items()},
+                   mdir / f"member_{m}.pt")
         models.append(net)
         history += hist
 
-    say(0.92, "evaluating and calibrating")
+    say(0.92, "testing on scans kept out of training")
     metrics = {}
     threshold = None
     calib_on = "real" if "real" in val_sets and len(val_sets["real"]["status"]) >= 20 else "synthetic"
@@ -358,8 +424,16 @@ def train(ws: Workspace, cfg: TrainConfig, progress: Callable[[float, str, dict]
         uncertainty_threshold=float(np.percentile(
             _run(models, val_sets[calib_on], tta=TTA)["mi"], 90)) if calib_on in val_sets else 0.2,
         tta=TTA,
+        trained_on=dict(computer=socket.gethostname(), device=describe_device(dev),
+                        system=f"{platform.system()} {platform.machine()}",
+                        torch=torch.__version__, minutes=round((time.time() - t_start) / 60, 1)),
     )
+    from ..modelstore import default_name
+    card["name"] = cfg.name.strip() or default_name(card)
     write_json(mdir / "model.json", card)
+    del models
+    if dev.type == "cuda":
+        torch.cuda.empty_cache()
     if ws.active_model_id(cfg.kind) in (None, model_id) or not ws.active_file(cfg.kind).exists():
         ws.set_active_model(model_id)
     say(1.0, "done", {"model_id": model_id})

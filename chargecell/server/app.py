@@ -11,11 +11,11 @@ from typing import Any, Optional
 from pydantic import ValidationError
 
 import numpy as np
-from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi import Body, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .. import kinds, labels, modelstore, protocol, runs, schema, virtual
+from .. import __version__, kinds, labels, modelstore, protocol, remote, runs, schema, virtual
 from ..analysis.decide import analyze, prediction_for_annotation
 from ..config import DeviceConfig
 from ..importers.generic import load_any
@@ -49,7 +49,21 @@ def _clean(o: Any) -> Any:
     return o
 
 
-def create_app(workspace: str | Path) -> FastAPI:
+def _lan_address() -> str | None:
+    """This computer's address on its network (no packet is sent)."""
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))
+            ip = s.getsockname()[0]
+        return None if ip.startswith("127.") else ip
+    except OSError:
+        return None
+
+
+def create_app(workspace: str | Path, listen: tuple[str, int] | None = None) -> FastAPI:
+    """The GUI's HTTP API. ``listen``: the host and port the server was started with (to tell a
+    training computer how to reach it)."""
     ws = Workspace(workspace)
     jobs = JobManager(ws)
     app = FastAPI(title="ChargeCell", docs_url="/api/docs")
@@ -68,7 +82,9 @@ def create_app(workspace: str | Path) -> FastAPI:
                     active_models=ws.active_models(), n_scans=len(ids),
                     n_labelled=len(ws.labelled_scan_ids()), n_models=len(ws.list_models()),
                     devices=[d.name for d in ws.list_devices()],
-                    running_jobs=[j for j in jobs.list() if j["state"] in ("queued", "running")])
+                    running_jobs=[{k: v for k, v in j.items() if k not in ("log", "history")}
+                                  for j in jobs.list()
+                                  if j["state"] in ("queued", "preparing", "waiting", "running")])
 
     # ------------------------------------------------------------------ scans
     @app.get("/api/scans")
@@ -421,29 +437,159 @@ def create_app(workspace: str | Path) -> FastAPI:
 
     @app.post("/api/train")
     def start_training(body: dict = Body(...)):
+        """Train here, or (``where: "elsewhere"``) prepare a job for another computer that runs
+        ``chargecell worker``. ``use_when_done``: put the new model in use when it is ready."""
         from ..model.train import TrainConfig, train
         allowed = {f.name for f in fields(TrainConfig)}
         cfg = TrainConfig(**{k: v for k, v in body.items() if k in allowed})
-        if cfg.kind not in kinds.KINDS:
-            raise HTTPException(400, f"kind must be one of {list(kinds.KINDS)}")
-        if not cfg.synthetic and not (cfg.use_real and ws.labelled_scan_ids()):
-            raise HTTPException(400, "Choose at least one synthetic dataset or label some scans.")
-        for name in cfg.synthetic:
-            man = json.loads((ws.synthetic_dir(name) / "manifest.json").read_text()) \
-                if (ws.synthetic_dir(name) / "manifest.json").exists() else None
-            if man is None:
-                raise HTTPException(400, f"No synthetic dataset called {name}.")
-            if man.get("kind", "PvP") != cfg.kind or man["size"] != cfg.size:
-                raise HTTPException(400, f"Dataset {name} holds {man.get('kind', 'PvP')} scans at "
-                                         f"{man['size']} px; this model is for {cfg.kind} scans "
-                                         f"at {cfg.size} px.")
+        try:
+            remote.check_config(ws, cfg)
+        except remote.JobFileError as e:
+            raise HTTPException(400, str(e))
+        use_when_done = bool(body.get("use_when_done", False))
+        spec = kinds.get(cfg.kind)
+        title = f"Train a {spec.short.lower()} model" + (f" ({cfg.name})" if cfg.name else "")
+        if body.get("where") == "elsewhere":
+            def prepare(progress):
+                path = ws.root / "remote" / f"{schema.new_id('trainingjob')}.zip"
+                remote.make_job_file(ws, cfg, path, lambda f, m: progress(f, m))
+                return {"job_file": str(path)}
+            return _clean(jobs.submit_remote("train", title, prepare, use_when_done=use_when_done,
+                                             config=cfg.__dict__))
 
         def fn(progress):
             mid = train(ws, cfg, progress)
+            if use_when_done:
+                modelstore.use(ws, mid)
             Analyzer._cache.clear()
-            return {"model_id": mid}
-        return jobs.submit("train", f"Train {cfg.kind} model ({cfg.ensemble} x {cfg.epochs} "
-                                    "epochs)", fn)
+            card = read_json(ws.model_dir(mid) / "model.json")
+            return {"model_id": mid, "name": modelstore.display_name(card)}
+        return jobs.submit("train", title, fn)
+
+    # ------------------------------------------------------------------ training elsewhere
+    def worker_token() -> str:
+        import secrets
+        p = ws.root / "worker_token"
+        if not p.exists():
+            p.write_text(secrets.token_urlsafe(18))
+        return p.read_text().strip()
+
+    def check_token(token: Optional[str]) -> None:
+        import hmac
+        if not token or not hmac.compare_digest(token, worker_token()):
+            raise HTTPException(401, "Wrong or missing token. Copy the worker command from the "
+                                     "Train page.")
+
+    @app.get("/api/worker/setup")
+    def worker_setup():
+        """What the Train page shows to connect a training computer."""
+        import socket
+        host, port = listen or ("127.0.0.1", 8765)
+        reachable = host not in ("127.0.0.1", "localhost", "::1")
+        urls = []
+        if reachable:
+            names = [socket.gethostname()] + ([ip] if (ip := _lan_address()) else []) \
+                if host in ("0.0.0.0", "::", "") else [host]
+            urls = [f"http://{n}:{port}" for n in names]
+        return dict(token=worker_token(), host=host, port=port, reachable=reachable, urls=urls,
+                    computer=socket.gethostname(), chargecell=__version__)
+
+    @app.get("/api/worker/hello")
+    def worker_hello(x_chargecell_token: Optional[str] = Header(None)):
+        check_token(x_chargecell_token)
+        return dict(ok=True, workspace=ws.root.name, chargecell=__version__)
+
+    @app.post("/api/worker/claim")
+    def worker_claim(body: dict = Body(default={}),
+                     x_chargecell_token: Optional[str] = Header(None)):
+        check_token(x_chargecell_token)
+        job = jobs.claim({k: str(v)[:200] for k, v in body.items()})
+        if job is None:
+            return Response(status_code=204)
+        return _clean({k: job[k] for k in ("id", "title", "config", "created")})
+
+    def remote_job_or_404(job_id: str) -> dict:
+        j = jobs.get(job_id)
+        if not j or j.get("where") != "remote":
+            raise HTTPException(404, "No such training job.")
+        return j
+
+    @app.get("/api/worker/jobs/{job_id}/job-file")
+    def worker_job_file(job_id: str, x_chargecell_token: Optional[str] = Header(None)):
+        check_token(x_chargecell_token)
+        j = remote_job_or_404(job_id)
+        if not j.get("job_file") or not Path(j["job_file"]).exists():
+            raise HTTPException(404, "The training-job file is gone.")
+        return FileResponse(j["job_file"], media_type="application/zip",
+                            filename=Path(j["job_file"]).name)
+
+    @app.post("/api/worker/jobs/{job_id}/progress")
+    def worker_progress(job_id: str, body: dict = Body(...),
+                        x_chargecell_token: Optional[str] = Header(None)):
+        check_token(x_chargecell_token)
+        remote_job_or_404(job_id)
+        cancel = jobs.remote_progress(job_id, float(body.get("progress", 0)),
+                                      str(body.get("message", ""))[:300], body.get("record"))
+        return {"cancel": cancel}
+
+    @app.post("/api/worker/jobs/{job_id}/model")
+    async def worker_model(job_id: str, request: Request,
+                           x_chargecell_token: Optional[str] = Header(None)):
+        check_token(x_chargecell_token)
+        j = remote_job_or_404(job_id)
+        tmp = ws.root / "tmp" / f"{job_id}-model.zip"
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "wb") as f:
+            async for chunk in request.stream():
+                f.write(chunk)
+        where = (j.get("worker") or {}).get("computer", "another computer")
+        try:
+            mid = modelstore.add(ws, tmp, use_it=bool(j.get("use_when_done")),
+                                 source=f"trained on {where}")
+        except modelstore.ModelFileError as e:
+            jobs.remote_failed(job_id, f"The model that came back could not be used: {e}")
+            raise HTTPException(400, str(e))
+        finally:
+            tmp.unlink(missing_ok=True)
+        Analyzer._cache.clear()
+        card = read_json(ws.model_dir(mid) / "model.json")
+        jobs.remote_done(job_id, {"model_id": mid, "name": modelstore.display_name(card)})
+        Path(j["job_file"]).unlink(missing_ok=True)             # can be large; not needed now
+        return _clean(modelstore.summary(ws, card))
+
+    @app.post("/api/worker/jobs/{job_id}/failed")
+    def worker_failed(job_id: str, body: dict = Body(...),
+                      x_chargecell_token: Optional[str] = Header(None)):
+        check_token(x_chargecell_token)
+        remote_job_or_404(job_id)
+        j = jobs.remote_failed(job_id, str(body.get("error", "failed"))[:2000],
+                               bool(body.get("cancelled")))
+        if j["state"] == "cancelled" and j.get("job_file"):
+            Path(j["job_file"]).unlink(missing_ok=True)
+        return {"state": j["state"]}
+
+    @app.get("/api/jobs/{job_id}/job-file")
+    def download_job_file(job_id: str):
+        """The training-job file, to carry to another computer by hand."""
+        j = remote_job_or_404(job_id)
+        if not j.get("job_file") or not Path(j["job_file"]).exists():
+            raise HTTPException(404, "The training-job file is not there (it is deleted once the "
+                                     "model has come back).")
+        return FileResponse(j["job_file"], media_type="application/zip",
+                            filename=f"chargecell-training-job-{job_id[-6:]}.zip")
+
+    @app.post("/api/jobs/{job_id}/retry")
+    def retry_job(job_id: str):
+        """Offer a failed or interrupted training job to training computers again."""
+        j = remote_job_or_404(job_id)
+        if j["state"] not in ("failed", "interrupted", "cancelled") or not j.get("job_file") \
+                or not Path(j["job_file"]).exists():
+            raise HTTPException(409, "Only a failed job whose training-job file is still there "
+                                     "can be tried again. Start a new training instead.")
+        j.update(state="waiting", cancel=False, error=None, progress=0.0, worker=None,
+                 message="waiting for a training computer", finished=None)
+        jobs._save(j)
+        return _clean(j)
 
     # ------------------------------------------------------------------ jobs
     @app.get("/api/jobs")

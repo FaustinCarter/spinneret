@@ -8,6 +8,8 @@
     chargecell schema     print the JSON Schema of the chargecell/1 request and response
     chargecell runs       list tune-up runs, print one as a graded tree, or --stats across runs
     chargecell models     list, switch, add, export, rename or delete models
+    chargecell train-job  train from a training-job file (on another computer, e.g. with a GPU)
+    chargecell worker     train jobs sent from the GUI on this computer (e.g. one with a GPU)
 """
 from __future__ import annotations
 
@@ -58,7 +60,11 @@ def cmd_serve(a) -> None:
     print(f"ChargeCell workspace: {ws.root}\nOpen {url} in your browser (Ctrl+C to stop).")
     if not a.no_browser:
         threading.Timer(1.2, lambda: webbrowser.open(url)).start()
-    uvicorn.run(create_app(ws.root), host=a.host, port=a.port, log_level="warning")
+    if a.host not in ("127.0.0.1", "localhost", "::1"):
+        print("Other computers on the network can now open ChargeCell (it has no login): use "
+              "--host 0.0.0.0 only on a network you trust.")
+    uvicorn.run(create_app(ws.root, listen=(a.host, a.port)), host=a.host, port=a.port,
+                log_level="warning")
 
 
 def cmd_simulate(a) -> None:
@@ -71,20 +77,63 @@ def cmd_simulate(a) -> None:
     print("\n" + json.dumps(man, indent=1))
 
 
+def _show_progress(f, m, r=None):
+    print(f"[{f:5.1%}] {m}" + (f"  (loss {r['train_loss']:.3f}, outcome right "
+                               f"{100 * r.get('val_status_acc', 0):.0f}%)"
+                               if r and "train_loss" in r else ""), flush=True)
+
+
 def cmd_train(a) -> None:
+    from . import modelstore, remote
     from .model.train import TrainConfig, train
     from .storage import Workspace
 
     ws = Workspace(a.workspace)
     cfg = TrainConfig(synthetic=a.synthetic, kind=a.kind, use_real=not a.no_real, size=a.size,
-                      base=a.base,
-                      epochs=a.epochs, ensemble=a.ensemble, batch_size=a.batch_size, lr=a.lr,
-                      notes=a.notes)
-    mid = train(ws, cfg, lambda f, m, r: print(f"[{f:5.1%}] {m} {r if r else ''}", flush=True))
+                      base=a.base, epochs=a.epochs, ensemble=a.ensemble,
+                      batch_size=a.batch_size, lr=a.lr, notes=a.notes, name=a.name or "",
+                      device=a.device)
+    try:
+        remote.check_config(ws, cfg)
+    except remote.JobFileError as e:
+        raise SystemExit(str(e))
+    if a.job_file:
+        path = remote.make_job_file(ws, cfg, a.job_file)
+        print(f"Wrote {path}. On the training computer run:\n  chargecell train-job {path.name}\n"
+              "then add the model file it writes with `chargecell models add <file>` (or on the "
+              "Models page).")
+        return
+    mid = train(ws, cfg, _show_progress)
     if a.activate:
-        ws.set_active_model(mid)
+        modelstore.use(ws, mid)
     card = json.loads((ws.model_dir(mid) / "model.json").read_text())
-    print(json.dumps({"model": mid, "metrics": card["metrics"]}, indent=1))
+    print(json.dumps({"model": mid, "name": card.get("name"), "metrics": card["metrics"]},
+                     indent=1))
+
+
+def cmd_train_job(a) -> None:
+    from . import remote
+    try:
+        job = remote.read_job(a.file)
+        print(f"Training a {job['config']['kind']} model from {a.file} (made on "
+              f"{job.get('made_on', '?')}, {sum(job.get('n_synthetic', {}).values())} simulated "
+              f"and {job.get('n_real', 0)} labelled scans).")
+        path = remote.run_job_file(a.file, a.out, device=a.device, progress=_show_progress)
+    except (remote.JobFileError, ValueError) as e:
+        raise SystemExit(str(e))
+    print(f"Wrote the model file {path}.\nOn the computer with the GUI: add it on the Models page "
+          f"(Add a model), or run `chargecell models add {path.name} --use`.")
+
+
+def cmd_worker(a) -> None:
+    from .worker import Server, WorkerError, run_worker
+    try:
+        n = run_worker(Server(a.server, a.token), device=a.device, once=a.once, poll=a.poll)
+        print(f"Stopped after {n} training job(s).")
+    except WorkerError as e:
+        raise SystemExit(str(e))
+    except KeyboardInterrupt:
+        print("\nStopped.")
 
 
 def cmd_calibrate(a) -> None:
@@ -275,8 +324,38 @@ def main(argv=None) -> None:
     s.add_argument("--batch-size", type=int, default=32)
     s.add_argument("--lr", type=float, default=2e-3)
     s.add_argument("--notes", default="")
-    s.add_argument("--activate", action="store_true")
+    s.add_argument("--name", default="", help="the model's name (default: scan kind and date)")
+    s.add_argument("--activate", action="store_true", help="put the new model in use")
+    s.add_argument("--device", default="auto",
+                   help="auto (a GPU if there is one), cpu, cuda, cuda:1 or mps")
+    s.add_argument("--job-file", default=None, metavar="FILE",
+                   help="do not train here: write a training-job file to run on another "
+                        "computer with `chargecell train-job FILE`")
     s.set_defaults(fn=cmd_train)
+
+    s = sub.add_parser("train-job", help="train from a training-job file (on another computer)",
+                       description="Run a training-job file made on the Train page (Train on "
+                       "another computer, Download the job file) or with `chargecell train "
+                       "--job-file`. Writes a model file (.zip) to bring back to the GUI.")
+    s.add_argument("file", help="the training-job file (.zip)")
+    s.add_argument("--out", default=None, help="model file or folder to write (default: next "
+                                                "to the job file)")
+    s.add_argument("--device", default="auto",
+                   help="auto (a GPU if there is one), cpu, cuda, cuda:1 or mps")
+    s.set_defaults(fn=cmd_train_job)
+
+    s = sub.add_parser("worker", help="train jobs sent from the GUI on this computer",
+                       description="Run on the computer that should do the training (for example "
+                       "one with a GPU). Copy the exact command, with the server address and "
+                       "token, from the Train page (Train on another computer).")
+    s.add_argument("--server", required=True, help="address of the ChargeCell GUI, e.g. "
+                                                    "http://lab-pc:8765")
+    s.add_argument("--token", required=True, help="the token shown on the Train page")
+    s.add_argument("--device", default="auto",
+                   help="auto (a GPU if there is one), cpu, cuda, cuda:1 or mps")
+    s.add_argument("--once", action="store_true", help="stop after one job (or none waiting)")
+    s.add_argument("--poll", type=float, default=15.0, help="seconds between checks for work")
+    s.set_defaults(fn=cmd_worker)
 
     s = sub.add_parser("models", help="list, switch, add, export, rename or delete models",
                        description="Models: one is in use per scan kind.\n\n"

@@ -20,7 +20,7 @@ from . import kinds, schema
 from .storage import Workspace, read_json, write_json
 
 FORMAT = "chargecell-model/1"
-MANIFEST = "chargecell-model.json"
+MANIFEST = "manifest.json"
 
 
 class ModelFileError(ValueError):
