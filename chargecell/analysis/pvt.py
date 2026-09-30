@@ -26,7 +26,7 @@ from ..quality import quality_metrics
 from ..schema import Scan
 from ..storage import Workspace
 from ..units import fmt_mag, fmt_v
-from .decide import demoted_status
+from .decide import ANCHOR_WIDTH, HIDDEN_LINE, demoted_status
 from .lattice import _fit, _from_line_map
 from .recommend import (common_fix, describe_move, finalize_window, widen_if_revisited,
                         window_step, _points)
@@ -103,6 +103,45 @@ def band(rows: np.ndarray, value: int) -> tuple[int, int] | None:
     return best
 
 
+def counting_checks(lines: dict, good: np.ndarray, load_p: np.ndarray, S: int) -> list[str]:
+    """Geometric checks that the first two loading lines can be counted from, independent of the
+    network's own FOUND and anchoring outputs (index space: plunger along i, tunnel gate along
+    j). ``lines`` maps index -> traced line; ``good`` marks rows where electrons load cleanly."""
+    l0, l1 = lines[0], lines[1]
+    js = [j for j in range(S) if good[j] and l0["j_lo"] <= j <= l0["j_hi"]
+          and l1["j_lo"] <= j <= l1["j_hi"]]
+    if not js:
+        return ["the first two loading lines do not share rows where electrons load cleanly"]
+    out = []
+    i0 = np.array([line_i(l0, j, S) for j in js])
+    i1 = np.array([line_i(l1, j, S) for j in js])
+    spacing = float(np.median(i1 - i0))
+    width = i0 + 0.5                                  # empty region: from the window edge
+    # as for PvP (and the training labels): wide enough in more than a fifth of the rows
+    if spacing <= 0 or (width >= ANCHOR_WIDTH * spacing).mean() <= 0.2:
+        out.append("the empty region is narrower than an electron spacing, so it could be an "
+                   "occupied cell cut off by the window edge")
+    # a faint first transition hidden in the "empty" region (counts would be one too high)
+    inner = [i for i in range(S) if i < np.min(i0) - 2]
+    if inner and spacing > 0:
+        col = load_p[np.array(js)][:, inner].mean(0)
+        if float(col.max()) > HIDDEN_LINE:
+            out.append("the line map shows a possible faint loading line inside the empty region")
+    # loading lines of one dot are parallel; a sensor or spectator feature usually is not
+    m0, m1 = l0["m"], l1["m"]
+    if abs(m0 - m1) > 0.35 * max(abs(m0), abs(m1)) + 0.05:
+        out.append("the first two loading lines are not parallel")
+    # both traced lines must be seen by the line map, not only by the occupancy map
+    for k, line in ((0, l0), (1, l1)):
+        vals = []
+        for j in js:
+            i = int(round(line_i(line, j, S)))
+            vals.append(float(load_p[j, max(0, i - 1):min(S, i + 2)].max()) if 0 <= i < S else 0.0)
+        if np.mean(vals) < 0.3:
+            out.append(f"loading line {k}->{k + 1} is not supported by the line map")
+    return out
+
+
 def analyze_pvt(ws: Workspace, scan: Scan, model_id: str | None = None,
                 cfg: DeviceConfig | None = None) -> dict:
     cfg = cfg or ws.get_device(scan.device)
@@ -151,6 +190,8 @@ def analyze_pvt(ws: Workspace, scan: Scan, model_id: str | None = None,
             checks.append("the first two loading lines were not both traced")
         elif good_rows(by_k[0]) < need or good_rows(by_k[1]) < need:
             checks.append("electrons do not load cleanly over enough of the tunnel-gate range")
+        else:
+            checks += counting_checks(by_k, good, p["lines_p"][0], S)
         if checks:
             status = demoted_status(sp)
     allowed = SPEC.reasons_for(status)
@@ -163,6 +204,9 @@ def analyze_pvt(ws: Workspace, scan: Scan, model_id: str | None = None,
             reason = "occupancy_too_low"
         elif good.sum() < need:
             reason = "tunnel_rate_too_low" if n_slow >= n_open else "reservoir_too_open"
+        elif 0 in by_k and 1 in by_k and any(("empty region" in c or "loading line" in c
+                                              or "parallel" in c) for c in checks):
+            reason = "no_reference"         # lines in view, but not countable from this window
 
     confidence = float(sp[schema.STATUSES.index(status)])
     mi = float(p["mutual_info"])
@@ -221,6 +265,20 @@ def analyze_pvt(ws: Workspace, scan: Scan, model_id: str | None = None,
         "features": features, "keypoints": keypoints, "recommendation": rec,
         "overlays": overlays,
     }
+
+
+def _spacing_index(lines: list[dict], cfg: DeviceConfig, gate: str, grid: Grid | None,
+                   S: int) -> float | None:
+    """Loading-line spacing along the plunger axis, in index units: measured between the
+    traced lines if there are two or more, else from the device prior."""
+    cs = sorted(line_i(l, (S - 1) / 2, S) for l in lines)
+    gaps = [b - a for a, b in zip(cs, cs[1:]) if b - a > 1.0]
+    if gaps:
+        return float(np.median(gaps))
+    prior = cfg.spacing(gate)
+    if prior and grid is not None and grid.dx:
+        return float(prior / abs(grid.dx))
+    return None
 
 
 def recommend_pvt(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: str, reason: str,
@@ -291,8 +349,15 @@ def recommend_pvt(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: str,
         basis = f"loading lines are smeared: close {yg} (slower tunnelling)"
     elif reason == "no_reference":
         lowest = min((line_i(l, c0, S) for l in seen_lines), default=None)
-        di = (lowest - 0.6 * (S - 1)) if lowest is not None else -0.75 * (S - 1)
-        di = min(di, -0.25 * (S - 1))
+        s_i = _spacing_index(seen_lines, cfg, xg, grid, S)
+        if lowest is not None and s_i:
+            # a window of ~3.4 spacings with the lowest line 1.7 spacings from its left edge:
+            # enough of the empty dot to count from, and the next line
+            wf_x = max(1.0, 3.4 * s_i / (S - 1))
+            di = (lowest - 1.7 * s_i) + wf_x * (S - 1) / 2 - c0
+        else:
+            di = (lowest - 0.6 * (S - 1)) if lowest is not None else -0.75 * (S - 1)
+        di = min(di, -0.1 * (S - 1))
         basis = f"no empty dot in view: lower {xg}"
     elif reason == "occupancy_too_low":
         first = next((l for l in lines if l["index"] == 0), None)

@@ -27,8 +27,8 @@ import numpy as np
 
 from .. import kinds, schema
 from ..preprocess import dilate, pack_lines, resample
-from .generator import (Artifacts, _loguniform, _slow_index, measure_sensor, sample_artifacts,
-                        sample_device, sensor_peak_mask)
+from .generator import (ANCHOR_WIDTH, Artifacts, _loguniform, _slow_index, measure_sensor,
+                        sample_artifacts, sample_device, sensor_peak_mask)
 from .physics import DeviceParams, classical_ground_state, occupations, sensor_slope
 
 SLOW_GT = 0.3          # Gamma*tau below this: electrons do not follow the sweep ("slow")
@@ -168,7 +168,10 @@ def sample_pvt_window(rng, p: DeviceParams, q: PvTParams, intent: str, coarse: b
     tilt = r_T * H                         # how far the lines move in P across the T range
     p0_lo, p0_hi = P0 - tilt / 2, P0 + tilt / 2
     if intent in (schema.FOUND, "tunnel_rate_too_low", "reservoir_too_open"):
-        x0 = p0_lo - rng.uniform(0.5, 1.3) * dva
+        # enough of the empty dot to count from (ANCHOR_WIDTH and a margin); a third of the
+        # windows keep a borderline empty region, where the call is hardest
+        lo, hi = (0.7, 1.9) if rng.random() < 0.35 else (1.4, 2.2)
+        x0 = p0_lo - rng.uniform(lo, hi) * dva
         x1 = p0_hi + dva + rng.uniform(0.4, 1.2) * dva
     elif intent == "no_transitions":
         x1 = p0_lo - rng.uniform(0.15, 1.0) * dva
@@ -302,7 +305,8 @@ def pvt_oracle(p: DeviceParams, q: PvTParams, w: PvTWindow, art: Artifacts, rend
     has1 = ((od >= 1) & nonslow).mean() > 0.03
     rows = nonslow.any(1)
     width0 = ((od == 0) & nonslow).sum(1) * px
-    wide = (width0[rows] >= 0.25 * dva).mean() > 0.2 if rows.any() else False
+    # only a line-free stretch wider than any occupied cell proves the dot is empty (as for PvP)
+    wide = (width0[rows] >= ANCHOR_WIDTH * dva).mean() > 0.2 if rows.any() else False
     ref = bool(has0 and has1 and wide)
 
     # rows (tunnel-gate values) where the k->k+1 line is crossed with electrons following
