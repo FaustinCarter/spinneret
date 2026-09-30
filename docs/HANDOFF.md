@@ -97,12 +97,12 @@ FOUNDs; Runs page and `chargecell runs`. Possible follow-ups, if the user wants 
 proposing the next *stage* (PvT → PvP → tie bar per qubit, open question 1), and comparing
 statistics between model versions (runs already store `model_id` per analysis).
 
-### 4.2 P1: Keypoint labels for PvT and tie-bar scans
+### 4.2 Done this session: labels for PvT and tie-bar scans
 
-The labeller draws PvP labels only. Real PvT and tie-bar data need keypoint labels: loading
-lines (polylines) + first index + the clean tunnel-gate range for PvT; triple points and the
-tie bar for tie-bar scans. Then `model/dataset.real_arrays` needs a per-kind conversion to the
-dense heads (as the simulators do), and the protocol `Label` an optional per-kind keypoint block.
+The labeller, drafts from the model, validation, the protocol (`clean_T`) and training
+(`real_arrays`) handle all three kinds (CODEMAP §2 "Annotation"). Checked against simulator
+truth only; the first real PvT and tie-bar scans should be labelled by an expert and compared
+with the drafts before relying on them.
 
 ### 4.3 P1: Real data
 

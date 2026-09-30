@@ -198,21 +198,31 @@ labelled later in the GUI (the label queue puts the most informative scans first
 }
 ```
 
-Labels with boundaries exist for PvP scans only so far; for PvT and tiebar scans send the status
-and reason (the scans are stored for when keypoint labels are added). Label fields mean the same
-as in the GUI's labeller (`docs/CODEMAP.md` §2, "Annotation"):
+Label fields mean the same as in the GUI's labeller (`docs/CODEMAP.md` §2, "Annotation"), for
+every scan kind:
 
 - Each `a_boundaries` entry is a polyline of (x, y) points, drawn bottom to top, separating k
-  from k+1 electrons in dot A.
-- `b_boundaries` are the same for dot B, drawn left to right.
+  from k+1 electrons in dot A (the dot swept along x).
+- `b_boundaries` are the same for dot B (along y), drawn left to right.
 - `a_offset` is the number of electrons in dot A left of every boundary: `0` means that region
-  is empty, and `null` means unknown. `b_offset` is the same for dot B, below every boundary.
-- `reason` must fit `status`: `none` for FOUND; one of `no_transitions`, `occupancy_too_low`,
-  `no_reference`, `partially_visible` for NOT_IN_WINDOW; one of `low_snr`, `sensor_insensitive`,
-  `dots_merged`, `charge_instability`, `resolution_too_coarse` for UNINTERPRETABLE.
+  is empty (at least an electron spacing of it is visible), and `null` means unknown.
+  `b_offset` is the same for dot B, below every boundary.
+- **Tie-bar scans:** `a_boundaries` holds dot A's 1 -> 2 boundary, which runs along the tie bar
+  between the two triple points, and `b_boundaries` dot B's 0 -> 1 boundary. Leave the offsets
+  out: they default to the tie-bar zoom's counts, 1 and 0.
+- **PvT scans:** the loading lines of the plunger's dot go in `a_boundaries` when the plunger is
+  on x (in `b_boundaries` when it is on y), with the count left of (below) the first line as
+  its offset. `clean_T: [low, high]` gives the tunnel-gate values, in `voltage_unit`, between
+  which electrons load cleanly; use `null` for a side where the clean range continues beyond
+  the window.
+- `reason` must fit `status` and the scan kind: `none` for FOUND; the kind's NOT_IN_WINDOW and
+  UNINTERPRETABLE reasons otherwise (`chargecell schema` lists them; PvP: `no_transitions`,
+  `occupancy_too_low`, `no_reference`, `partially_visible` / `low_snr`, `sensor_insensitive`,
+  `dots_merged`, `charge_instability`, `resolution_too_coarse`; PvT adds
+  `tunnel_rate_too_low` and `reservoir_too_open`; tie bar: `no_tiebar`, `partially_visible`).
 
-A status alone is accepted, but the boundaries are what teach the network where the cells are.
-Only labelled `PvP` scans are used for training so far.
+A status alone is accepted, but the boundaries are what teach the network where things are.
+Labelled scans of every kind are used when that kind's model is retrained.
 
 ## Runs: the automation tree
 

@@ -12,7 +12,7 @@ chargecell/
   storage.py           Workspace: plain-folder persistence (JSON + npz)
   preprocess.py        resampling, network input features, line-mask packing
   quality.py           classical pre-model checks (hard fails, noise, clipping)
-  labels.py            annotation format <-> dense labels; status suggestion; model drafts
+  labels.py            annotation format <-> dense labels per kind; status suggestion; drafts
   simulate/physics.py  triple-dot constant-interaction + tunnel-coupling model, sensor dot
   simulate/generator.py device/window/artefact sampling, rendering, oracle labels (PvP)
   simulate/pvt.py      plunger-vs-tunnel-gate scans: reservoir rate, latching, broadening, labels
@@ -108,19 +108,26 @@ jobs/<id>.json                       job records
 
 ### Annotation (`labels.empty_annotation`)
 ```json
-{"scan_id", "annotator", "created", "updated",
- "status": "FOUND|NOT_IN_WINDOW|UNINTERPRETABLE|null", "reason": "<REASONS>|null",
+{"scan_id", "annotator", "created", "updated", "kind": "PvP|PvT|tiebar",
+ "status": "FOUND|NOT_IN_WINDOW|UNINTERPRETABLE|null", "reason": "<the kind's reasons>|null",
  "a_boundaries": [[[x_V, y_V], ...], ...],   // each: a k->k+1 staircase of dot A, drawn bottom->top
  "b_boundaries": [...],                      // dot B, drawn left->right
  "a_offset": 0|1|2|3|null, "b_offset": ...,  // electrons left of / below all boundaries; null = unknown
+ "clean_T": [lo_V|null, hi_V|null] | null,   // PvT: tunnel-gate range where electrons load cleanly
  "spectator_lines": [...], "sensor_lines": [...],
- "notes", "origin": "manual|model:<id>", "reviewed": bool}
+ "notes", "origin": "manual|api|model:<id>", "reviewed": bool}
 ```
 `dense_from_annotation(ann, xs, ys)` gives per-pixel `occ_a`, `occ_b` (with OCC_IGNORE where
 the offset is unknown), line masks, and `ref_a`/`ref_b`. `relative_occupancy` counts boundaries
-crossed. `suggest_status` derives a status and reason from the drawn geometry (edge threshold
-0.25). `annotation_from_prediction` turns a model prediction into an editable draft. The
-round trip truth -> polylines -> dense agrees on ~99% of pixels.
+crossed. `suggest_status(ann, xs, ys, kind, plunger_on_x)` derives a status and reason from the
+drawn geometry (PvP edge threshold 0.25). `annotation_from_prediction` turns a PvP prediction
+into an editable draft (`analysis/pvt.draft_annotation` and `analysis/tiebar.draft_annotation`
+for the other kinds). The round trip truth -> polylines -> dense agrees on ~99% of pixels.
+Tie-bar labels (`tiebar_dense`): dot A's 1 -> 2 and dot B's 0 -> 1 boundaries with default
+offsets 1 and 0 (`default_offsets`) give the region map and tie-bar line masks. PvT labels
+(`pvt_dense`): the loading lines are dot-A boundaries when the plunger is on x (dot-B when on y);
+`clean_T` gives the regime per tunnel-gate value (`pvt_regime_1d`: 0 slow below, 1 clean, 2 open
+above); occupancy is ignored where the regime is slow.
 
 ### Synthetic shards (`model/dataset.py: sample_to_arrays`, `simulate/pvt.pvt_to_arrays`, `simulate/tiebar.tiebar_to_arrays`)
 Per sample, at `size x size`: `signal` float16; `occ` int8 (H, S, S), the kind's class heads in
@@ -219,7 +226,9 @@ preset, mix)` takes about 55 ms and yields ~41% FOUND, 27% NOT, 32% UNINTERP by 
 
 ### model/dataset.py, model/train.py
 `build_synthetic` writes shards (multiprocess via `workers`) and a manifest with counts.
-`real_arrays` turns labelled scans into arrays (dense labels resampled to S).
+`real_arrays(ws, size, only_reviewed, kind)` turns labelled scans of one kind into arrays in the
+layout of that kind's synthetic shards (`_real_sample`: PvP occupancy maps; PvT occupancy +
+regime rows, transposed so the plunger is on x (`plunger_on_x`); tie-bar region map).
 `group_split` splits by `device|cooldown`. `CSDDataset` augments with polarity flips and
 transposes (a transpose swaps A and B labels). `train`: trains the ensemble members
 (OneCycle LR, optional `max_minutes`), then `full_metrics` on validation sets,
@@ -331,10 +340,10 @@ readout sensor must see the interdot step), drawn from a separate random stream.
 | POST | `/api/scans/import` | multipart `files[]` + x_gate, y_gate, device, cooldown, axis_units, notes, kind |
 | GET/PATCH/DELETE | `/api/scans/{id}` | scan (signal as base64 float32 LE) / edit meta / delete |
 | GET | `/api/scans/{id}/truth` | practice-device ground truth |
-| GET/PUT/DELETE | `/api/scans/{id}/annotation` | label (+ preview occ_code on the scan grid and suggestion) |
+| GET/PUT/DELETE | `/api/scans/{id}/annotation` | label (+ preview occ_code on the scan grid, suggestion and, for PvT, `plunger_on_x`); reasons checked per kind |
 | POST | `/api/scans/{id}/annotation/preview` | preview without saving |
-| POST | `/api/scans/{id}/draft_from_model` | annotation draft from the model |
-| GET | `/api/label_queue` | unlabelled PvP scans, most uncertain first |
+| POST | `/api/scans/{id}/draft_from_model` | annotation draft from the model of the scan's kind |
+| GET | `/api/label_queue` | unlabelled scans of every kind, most uncertain first |
 | POST/GET | `/api/scans/{id}/analyze`, `/analysis` | run / fetch analysis (404 if none) |
 | GET | `/api/v1/scans/{id}/response?download=` | saved analysis as a chargecell/1 response |
 | POST | `/api/v1/analyze` | chargecell/1 request -> response (422 invalid, 409 no model) |
@@ -380,8 +389,10 @@ numerals.
   The annotator name is kept in localStorage (`cc-annotator`). Scan kinds: `KIND_LABEL`,
   `statusLabel(kind, status)`; `drawFeatures` draws PvT/tie-bar keypoints (points are gate -> V,
   polylines are on the analysis axes and swapped when a PvT analysis was transposed); `onAxes`
-  maps a recommended window onto the scan's own axes by gate name. The Label page and label queue
-  handle PvP scans only; `practiceButtons()` creates a practice device for a chosen kind.
+  maps a recommended window onto the scan's own axes by gate name. The Label page adapts to the
+  scan kind (`buildTools`, `reasonsFor`, `reasonLabel`; PvT: one "Loading line" tool on the
+  plunger axis, `drawCleanRange`, picking the clean range on the plot via `this.picking`);
+  `practiceButtons()` creates a practice device for a chosen kind.
   `pages.runs` lists runs (`#/runs/<runId>` selects one), draws the tree with `gradeMark`,
   adds notes, closes runs, and shows `run_stats`. The Review page links to a scan's run.
 - Labeller: tools V/A/B/S/E; click adds points; double-click or Enter finishes (trailing
@@ -406,6 +417,9 @@ numerals.
   fitted interdot width matches the physics, oracle closed loops for PvT (no priors or limits)
   and tie bar, PvT axes either way round, tiny training runs per kind (per-kind active model),
   and protocol responses with the new feature types.
+- `test_labels_kinds.py`: PvT and tie-bar label round trips against simulator truth, the HTTP
+  labelling workflow for both kinds (queue, defaults, per-kind reasons, drafts, training arrays),
+  protocol labels (clean_T in mV, tie-bar default counts, reasons of another kind rejected).
 - `test_runs.py`: a backend run through the protocol (PvP to FOUND, then the tie bar) recorded
   as a graded tree in depth-first order, advice following, device-run grouping and the 4-hour
   gap, closed runs, errors; practice closed loops as runs with truth-checked FOUNDs, reviews,

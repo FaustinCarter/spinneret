@@ -60,9 +60,9 @@ kind, trained on simulated scans) are installed on first start. To rebuild them:
    Always fill in the cooldown and the scan kind.
 4. **Review and act.** Each scan gets an outcome and next steps. Copy the settings, or download
    the result as JSON for your measurement code.
-5. **Label.** On the Label page, draw the dot boundaries, set the electron counts, choose the
-   outcome (plunger-vs-plunger scans for now). The queue shows the scans the model is least
-   sure about first.
+5. **Label.** On the Label page, draw the dot boundaries (loading lines and the clean
+   tunnel-gate range for PvT scans), set the electron counts, choose the outcome. The queue
+   shows the scans the model is least sure about first.
 6. **Audit.** The Runs page shows each tune-up as a graded tree: every scan, what ChargeCell
    concluded and advised, whether the next scan followed the advice, and where it got stuck.
 7. **Retrain.** On the Train page, pick a scan kind and combine synthetic datasets with your

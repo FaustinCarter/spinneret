@@ -139,6 +139,16 @@ view (makes faint lines visible). Scroll to zoom, Shift-drag to pan.
 Mark **Second check done** when a second person has looked at the label. You can train on only
 double-checked labels.
 
+**Tie-bar scans** are labelled the same way, with two lines: dot A's boundary where it goes from
+1 to 2 electrons (it runs along the tie bar between the two triple points) and dot B's boundary
+from 0 to 1. The counts are already set to those of a tie-bar zoom (1 and 0).
+
+**Plunger-vs-tunnel-gate scans**: press **L** and draw each loading line of the dot, following it
+across the tunnel-gate range. Say how many electrons sit left of the first line (0 if the empty
+dot is visible). Then mark the **clean tunnel-gate range**: where the lines are sharp and
+continuous. Type the two values or use **Pick on plot**; leave a field empty if the clean range
+continues beyond the window. The plot shades where the tunnel gate is too closed or too open.
+
 ## Making a better model
 
 1. **Synthetic data**: generate a few thousand simulated scans (about 3000 is a good start). Use

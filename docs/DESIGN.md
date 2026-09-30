@@ -278,8 +278,9 @@ what the backend or operator reports (the protocol's run events).
 
 - The starter models have only seen simulations. Label real scans from at least two cooldowns and
   retrain before trusting them on a new device.
-- The labeller draws PvP labels only; PvT and tie-bar scans can be stored with a status and
-  reason, and need keypoint labels (loading lines, triple points) before real data can train them.
+- PvT and tie-bar labels are drawn as boundaries (loading lines and the clean tunnel-gate range;
+  dot A's 1 -> 2 and dot B's 0 -> 1 boundaries around the tie bar) and converted to the dense
+  heads of their models; they have only been checked against simulator truth so far.
 - The labelling tool assumes electron orientation (occupancy grows with voltage). Analysis supports
   hole devices; labelling them needs a flipped drawing convention.
 - The chargecell/1 protocol has only been exercised by the tests and practice devices, not yet by
