@@ -42,14 +42,17 @@ chargecell serve                       # opens http://127.0.0.1:8765
 ```
 
 The workspace (scans, labels, models) lives in `~/chargecell-workspace` unless you pass
-`-w /path/to/workspace`. The starter models bundled in `chargecell/assets/models/` (one per scan
-kind, trained on simulated scans) are installed on first start. To rebuild them:
-`python scripts/train_starter.py --kind <PvP|PvT|tiebar> ... --bundle` (see the script).
+`-w /path/to/workspace`. Starter models bundled in `chargecell/assets/models/` are installed on
+first start, but **none is bundled yet**: the models trained so far do not meet the acceptance
+bar (see "What is validated"). To try ChargeCell now, install the candidate models kept in
+`models/candidates/` (its README says how), or train your own on the Synthetic data and Train
+pages. To rebuild the starter models: `python scripts/train_starter.py --kind
+<PvP|PvT|tiebar> ... --bundle` (see the script).
 
 ## Quick start
 
-1. **Try it without hardware.** On the Scans page choose a scan kind next to **New practice
-   device**. ChargeCell simulates a triple dot and takes a first scan. Click **Analyse**, read
+1. **Try it without hardware** (needs a model for that scan kind; see Install). On the Scans
+   page choose a scan kind next to **New practice device**. ChargeCell simulates a triple dot and takes a first scan. Click **Analyse**, read
    the outcome, then **Measure it on the practice device** to follow the advice. Repeat until it
    says found. **Reveal the true answer** shows whether the call was right.
 2. **Set up your device** (optional). On the Device page enter gate names (P plungers, X
@@ -113,7 +116,24 @@ chargecell runs                                                 # tune-up runs; 
 
 ## What is validated, and what is not
 
-(Pending: filled in once the starter models are trained and evaluated.)
+- **Guidance logic**, with perfect perception (the simulator's truth in place of the network):
+  on 30 simulated devices per kind with random voltage scales, PvP, PvT and tie bar each reach
+  the goal on 30/30 with every FOUND correct (median 3, 3 and 1 scans). 37 automated tests.
+- **The trained models, on simulated data only.** No real scan has been seen yet. The agreed
+  bar for bundling a starter model: FOUND precision ≥ 0.95 on held-out simulated scans, and a
+  closed loop on 30 practice devices that reaches the goal on ≥ 70% within 8 scans with no
+  wrong FOUND. Final numbers (`scripts/eval_model.py --n 300 --nav 30 --seed 2029`):
+
+  | Kind | Held-out FOUND precision / recall | Closed loop: goal reached, wrong FOUNDs | Bar |
+  |---|---|---|---|
+  | PvP | 0.973 / 0.41 | 15/30, none wrong | not met (needs 21/30) |
+  | PvT | 0.958 / 0.41 | 6/30, 1 wrong | not met |
+  | Tie bar | 1.0 / 0.17 | 9/30, none wrong | not met |
+
+  The PvP model is conservative rather than wrong: when it is not sure it says so and asks for
+  a confirmation scan or a wider window. Next steps are in `docs/HANDOFF.md` (section 4.1).
+- **Not validated:** anything on real devices. Label real scans from at least two cooldowns
+  before trusting any model; the model cards then report real-data metrics.
 
 More: `docs/OPERATOR_GUIDE.md` (plain-language guide), `docs/DESIGN.md` (how it works),
 `docs/PROTOCOL.md` (integration), `docs/CODEMAP.md` (developer reference),
@@ -126,4 +146,5 @@ chargecell/        the package (simulators, models, analysis per scan kind, prot
 tests/             pytest suite (oracle-based guidance tests, API workflow, training smoke tests)
 scripts/           train_starter, eval_model, nav_trace, gui_check
 docs/              operator guide, design, protocol, code map, research notes, decisions, handoff
+models/candidates/ trained models below the bundling bar (Git LFS; not installed)
 ```

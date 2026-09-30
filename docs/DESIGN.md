@@ -265,7 +265,29 @@ Everything is computed in the model's index grid and converted to volts at the e
 
 ## 11. Starter models
 
-(Pending: filled in once the starter models are trained and evaluated.)
+Starter models are trained on simulated scans only (`scripts/train_starter.py`), calibrated at
+target precision **0.99** on held-out synthetic scans that share no seeds with the training data
+(the default for models users train stays 0.97), and bundled in `chargecell/assets/models/`
+(Git LFS) only if they meet the acceptance bar agreed with the user: FOUND precision ≥ 0.95 on
+held-out synthetic scans, and a closed loop that reaches the goal on ≥ 70% of 30 practice
+devices within 8 scans with no wrong FOUND (`scripts/eval_model.py --n 300 --nav 30`).
+
+**None meets the bar yet, so none is bundled** (HANDOFF section 3 has the table; the models
+are kept in `models/candidates/`). Final numbers, on a seed no decision looked at:
+
+- PvP (96 px, 3 members): held-out precision 0.973, recall 0.41; closed loop 15/30, no wrong
+  FOUND. Safe, but half the practice devices end with (1,1) in view and the network not
+  confident enough (median 0.94 against a threshold of 0.995).
+- PvT (64 px, 2 members): held-out precision 0.958, recall 0.41; closed loop 6/30 with one wrong
+  FOUND. Perception problems on practice windows (latching, tunnel regime, first line at the
+  window edge).
+- Tie bar (64 px, 2 members): held-out precision 1.0, recall 0.17; closed loop 9/30, no wrong
+  FOUND. Safe, but it calls many strongly coupled practice tie bars "dots merged".
+
+Why 0.99: a closed loop visits mostly near-miss windows (the guidance steers toward the goal),
+where a threshold calibrated to 0.97 on the synthetic mix still let through wrong FOUNDs at
+confidence 0.96-0.99. The first-order fixes found on the way were in the labels (DECISIONS 31)
+and the guidance (DECISIONS 30, 32), not in the network.
 
 ## 12. Automation tree (`chargecell/runs.py`)
 

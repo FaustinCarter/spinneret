@@ -39,6 +39,7 @@ chargecell/
 tests/                 conftest (OracleAnalyzer), test_core, test_guidance, test_api,
                        test_protocol, test_kinds, test_labels_kinds, test_runs, test_tta
 scripts/               train_starter, eval_model, nav_trace, gui_check
+models/candidates/     trained models that did not meet the bundling bar (Git LFS, not installed)
 ```
 
 ## 1. Conventions that everything depends on

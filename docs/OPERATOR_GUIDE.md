@@ -4,10 +4,12 @@ This guide is for the person at the fridge. No programming needed.
 
 ## Before the first use
 
-ChargeCell ships starter models trained on simulated scans, installed on first start. The
-sidebar lists which scan kinds have a model. If one is missing, go to **Synthetic data**,
-generate about 3000 scans of that kind, then **Train** a model on them (see "Making a better
-model" below).
+ChargeCell installs the starter models bundled with it on first start. None is bundled yet:
+the models trained so far on simulated scans are safe but do not find the goal often enough
+(see README, "What is validated"). The sidebar lists which scan kinds have a model. If one is
+missing, go to **Synthetic data**, generate about 3000 scans of that kind, then **Train** a
+model on them (see "Making a better model" below), or install a candidate model from
+`models/candidates/` in the repository (its README says how).
 
 On the **Device** page, fill in what you know: gate names (P plungers, X exchange gates,
 T tunnel gates, M sensor), safe limits, the largest step you allow. Everything is optional and

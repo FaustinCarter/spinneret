@@ -18,7 +18,7 @@ Background: `docs/DESIGN.md`, `docs/DECISIONS.md`, `docs/RESEARCH_NOTES.md`. Int
 ```bash
 git lfs install && git lfs pull                 # bundled model weights are in Git LFS
 pip install -e ".[dev]"                          # Python >= 3.10; CPU torch is fine
-pytest -q                                        # 35 tests, ~3 min on 4 cores
+pytest -q                                        # 37 tests, ~3 min on 4 cores
 python scripts/nav_trace.py --oracle --bench --kind PvP   # guidance benchmark, expect 30/30
 python scripts/nav_trace.py --oracle --bench --kind PvT   # (also tiebar; add --no-prior)
 chargecell -w /tmp/demo_ws serve --no-browser    # GUI at http://127.0.0.1:8765
