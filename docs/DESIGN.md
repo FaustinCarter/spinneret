@@ -226,7 +226,7 @@ Everything is computed in the model's index grid and converted to volts at the e
 - **Guidance with perfect perception** (`tests/test_guidance.py`, `tests/test_kinds.py`,
   `scripts/nav_trace.py --oracle --bench --kind ...`, ground truth in place of the network) on
   practice devices with random voltage scales, 30 devices per kind: PvP 30/30 (median 3 scans,
-  also 30/30 with no priors or limits), PvT 30/30 (median 2, half the devices start with the
+  also 30/30 with no priors or limits), PvT 30/30 (median 3, half the devices start with the
   tunnel gate too closed), tie bar 30/30 (median 1); every FOUND matches the ground truth.
 - **Practice devices behave like a tuned-up operator's device**: the sensor is tuned at the
   starting voltages and is sensitive to the P1-P2 interdot step (as a readout sensor must be);

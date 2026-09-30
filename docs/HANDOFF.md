@@ -49,18 +49,19 @@ hole-device labelling were not chosen.
 | PvT simulator, model, analysis, guidance | Done; see section 3 for the trained model |
 | Tie-bar simulator, model, analysis (measured coupling), guidance | Done; see section 3 |
 | Practice devices with P, X, T gates; closed-loop evaluation per kind | Done |
-| GUI: kinds, practice per kind, keypoint display | Done; labeller is PvP-only |
+| GUI: kinds, practice per kind, keypoint display, Runs page | Done, browser-checked (`scripts/gui_check.py`) |
+| Labelling for all three kinds (labeller, model drafts, protocol, training) | Done, tested against simulator truth |
 | Starter models bundled (Git LFS) | In progress (PvP retraining; PvT and tie-bar next) |
-| CI (GitHub Actions) | Green on every push this session |
+| CI (GitHub Actions) | Green (one red run, the label round trip, fixed in the next push) |
 | Automation tree / audit log (`runs.py`, Runs page, protocol run endpoints, CLI) | Done, tested |
 
 ## 3. Verified results (reproducible)
 
-- `pytest -q`: 28 tests (about 3 minutes on 4 cores; `test_kinds.py` trains tiny models).
+- `pytest -q`: 33 tests (about 3 minutes on 4 cores; `test_kinds.py` trains tiny models).
 - Guidance with perfect perception, 30 practice devices each (`python scripts/nav_trace.py
   --oracle --bench --kind <kind>`), every FOUND correct: PvP 30/30 (median 3 scans; 30/30 also
-  with `--no-prior`), PvT 30/30 (median 2; half the devices start with the tunnel gate too
-  closed; 30/30 with `--no-prior`), tie bar 30/30 (median 1).
+  with `--no-prior`), PvT 30/30 (median 3 since the stricter anchoring; half the devices start
+  with the tunnel gate too closed; 30/30 with `--no-prior`), tie bar 30/30 (median 1).
 - Tie-bar coupling measurement: the fitted interdot width is within 35% of the physics
   (`test_tiebar_width_is_measured_from_the_signal`).
 - Trained starter models (`scripts/eval_model.py`, fresh held-out scans, seed 2027; closed loop
