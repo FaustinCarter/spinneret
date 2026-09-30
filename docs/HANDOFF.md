@@ -54,6 +54,9 @@ hole-device labelling were not chosen.
 | Starter models bundled (Git LFS) | In progress (PvP retraining; PvT and tie-bar next) |
 | CI (GitHub Actions) | Green (one red run, the label round trip, fixed in the next push) |
 | Automation tree / audit log (`runs.py`, Runs page, protocol run endpoints, CLI) | Done, tested |
+| FOUND threshold calibrated on the final decision; test-time augmentation; `chargecell calibrate` | Done, tested (DECISIONS 27, 28) |
+| Confirmation rescan for a FOUND held back only by confidence (all kinds, protocol purpose `confirm`) | Done, tested (DECISIONS 30) |
+| Simulator "too noisy" labels use the noise visible in the image | Done; all three kinds retrained on it (DECISIONS 31) |
 
 ## 3. Verified results (reproducible)
 
