@@ -5,7 +5,8 @@
 
 Needs: pip install playwright && python -m playwright install chromium
 Does: creates two practice devices if the workspace has no scans; analyses one (if a model is
-active) so the Review page shows overlays; screenshots every page; for each scan kind with an
+active) so the Review page shows overlays; screenshots every page (the Train page also with
+"another computer" chosen, train_elsewhere.png); for each scan kind with an
 active model, creates a practice device, analyses it, follows the advice once on the practice
 device and screenshots the Review page (review_<kind>_1.png, _2.png) and the Runs page with the
 automation tree they recorded (runs.png) and the labeller with a model draft for each kind
@@ -47,10 +48,20 @@ async def run(url: str, out: Path) -> None:
         errs = []
         pg.on("pageerror", lambda e: errs.append(f"pageerror: {e}"))
         pg.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
-        for name in ("review", "label", "scans", "synthetic", "train", "device"):
+        for name in ("home", "models", "review", "label", "scans", "synthetic", "train", "device"):
             await pg.goto(f"{url}/#/{name}/{sid}" if name in ("review", "label") else f"{url}/#/{name}")
             await pg.wait_for_timeout(1500)
             await pg.screenshot(path=str(out / f"{name}.png"), full_page=True)
+        await pg.goto(f"{url}/#/train")
+        await pg.wait_for_timeout(1000)
+        await pg.get_by_text("Another computer, for example one with a GPU").click()
+        await pg.wait_for_timeout(1000)
+        await pg.screenshot(path=str(out / "train_elsewhere.png"), full_page=True)
+        await pg.set_viewport_size({"width": 700, "height": 900})       # narrow window
+        await pg.goto(f"{url}/#/home")
+        await pg.wait_for_timeout(1000)
+        await pg.screenshot(path=str(out / "home_narrow.png"), full_page=True)
+        await pg.set_viewport_size({"width": 1440, "height": 900})
 
         # every scan kind with a model: analyse a practice scan, follow the advice once
         active = api(url, "/api/status").get("active_models", {})
@@ -74,7 +85,7 @@ async def run(url: str, out: Path) -> None:
             k_sid = api(url, "/api/virtual", "POST", {"kind": kind, "seed": 12})["scan_id"]
             await pg.goto(f"{url}/#/label/{k_sid}")
             await pg.wait_for_timeout(1500)
-            await pg.click("text=Draft from model")
+            await pg.click("text=Start from the model's reading")
             await pg.wait_for_timeout(1500)
             await pg.screenshot(path=str(out / f"label_{kind}.png"), full_page=True)
 
@@ -107,7 +118,7 @@ async def run(url: str, out: Path) -> None:
         await pg.get_by_role("group", name=f"Dot A ({scan['x_gate']}) left of all A boundaries").get_by_text("0", exact=True).click()
         await pg.get_by_role("group", name=f"Dot B ({scan['y_gate']}) below all B boundaries").get_by_text("0", exact=True).click()
         await pg.wait_for_timeout(500)
-        await pg.get_by_text("(1,1) not in this window").click()
+        await pg.get_by_text("(1,1) is not in this scan").click()
         await pg.get_by_label("Your name").fill("GUI check")
         await pg.screenshot(path=str(out / "label_drawn.png"))
         await pg.get_by_role("button", name="Save label").click()

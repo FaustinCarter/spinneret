@@ -18,7 +18,8 @@ device settings are optional, and missing ones are replaced by fractions of the 
 
 - HTTP: run `chargecell serve` and `POST` to the endpoints below.
 - Files: `chargecell analyze request.json --json` (or `--out DIR` to write
-  `<name>.response.json`). Request files can also be imported on the GUI's Scans page.
+  `<name>.response.json`). Request files can also be imported on the Scans page of ChargeCell's
+  web page.
 - Python: `chargecell.client` (standard library plus numpy; copy it into your environment).
 - Schema: `chargecell schema` or `GET /api/v1/schema` gives the JSON Schema of both messages.
   The models are defined in `chargecell/protocol.py`, which is the source of truth.

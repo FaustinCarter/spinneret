@@ -1,15 +1,19 @@
 """ChargeCell command line.
 
-    chargecell serve      start the GUI (opens a browser)
-    chargecell simulate   generate a synthetic dataset
-    chargecell train      train a model version
-    chargecell analyze    analyse scan files (or chargecell/1 request files) and print the result
-    chargecell navigate   test the guidance on simulated practice devices
-    chargecell schema     print the JSON Schema of the chargecell/1 request and response
-    chargecell runs       list tune-up runs, print one as a graded tree, or --stats across runs
-    chargecell models     list, switch, add, export, rename or delete models
+    chargecell serve      start the web page (opens a browser)
+    chargecell models     list the models, switch, add, download (export), rename or delete one
+    chargecell simulate   make a set of simulated scans to train on
+    chargecell train      train a model (here, or write a training-job file for another computer)
     chargecell train-job  train from a training-job file (on another computer, e.g. with a GPU)
-    chargecell worker     train jobs sent from the GUI on this computer (e.g. one with a GPU)
+    chargecell worker     train the jobs sent from the Train page on this computer (e.g. a GPU)
+    chargecell analyze    analyse scan files and print what ChargeCell reads and advises
+    chargecell runs       the history: list tune-up runs, show one step by step, or --stats
+    chargecell navigate   try the advice on simulated practice devices
+    chargecell calibrate  set again how sure a model must be to say "found"
+    chargecell schema     print the format of the chargecell/1 messages (JSON Schema)
+
+Everything is kept in one workspace folder (-w). Words used here are explained in the glossary
+at the end of the README.
 """
 from __future__ import annotations
 
@@ -121,8 +125,9 @@ def cmd_train_job(a) -> None:
         path = remote.run_job_file(a.file, a.out, device=a.device, progress=_show_progress)
     except (remote.JobFileError, ValueError) as e:
         raise SystemExit(str(e))
-    print(f"Wrote the model file {path}.\nOn the computer with the GUI: add it on the Models page "
-          f"(Add a model), or run `chargecell models add {path.name} --use`.")
+    print(f"Wrote the model file {path}.\nOn the computer that runs ChargeCell's web page, add it "
+          f"on the Models page (Add a model file), or run `chargecell models add {path.name} "
+          "--use`.")
 
 
 def cmd_worker(a) -> None:
@@ -294,36 +299,48 @@ def cmd_runs(a) -> None:
 def main(argv=None) -> None:
     p = argparse.ArgumentParser(prog="chargecell", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--workspace", "-w", default=DEFAULT_WS, help=f"workspace folder ({DEFAULT_WS})")
+    p.add_argument("--workspace", "-w", default=DEFAULT_WS,
+                   help=f"the folder that holds scans, labels and models ({DEFAULT_WS})")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    s = sub.add_parser("serve", help="start the GUI")
-    s.add_argument("--host", default="127.0.0.1")
-    s.add_argument("--port", type=int, default=8765)
-    s.add_argument("--no-browser", action="store_true")
+    s = sub.add_parser("serve", help="start the web page")
+    s.add_argument("--host", default="127.0.0.1",
+                   help="127.0.0.1: only this computer can open it (default). 0.0.0.0: other "
+                        "computers on the network can too, e.g. a training computer (there is "
+                        "no password: use only on a network you trust)")
+    s.add_argument("--port", type=int, default=8765, help="port number (default 8765)")
+    s.add_argument("--no-browser", action="store_true", help="do not open a browser")
     s.set_defaults(fn=cmd_serve)
 
-    s = sub.add_parser("simulate", help="generate a synthetic dataset")
-    s.add_argument("--name", required=True)
-    s.add_argument("-n", type=int, default=3000)
-    s.add_argument("--size", type=int, default=96)
-    s.add_argument("--preset", default="mixed", choices=["mixed", "hrl_linear", "hrl_triangle"])
-    s.add_argument("--seed", type=int, default=0)
-    s.add_argument("--workers", type=int, default=1)
-    s.add_argument("--kind", default="PvP", choices=["PvP", "PvT", "tiebar"])
+    s = sub.add_parser("simulate", help="make a set of simulated scans to train on")
+    s.add_argument("--name", required=True, help="name of the set")
+    s.add_argument("-n", type=int, default=3000, help="number of scans (default 3000)")
+    s.add_argument("--size", type=int, default=96,
+                   help="image size in pixels; must match the model (96 for PvP, 64 for PvT "
+                        "and tiebar)")
+    s.add_argument("--preset", default="mixed", choices=["mixed", "hrl_linear", "hrl_triangle"],
+                   help="device layout: three dots in a line, in a triangle, or both")
+    s.add_argument("--seed", type=int, default=0,
+                   help="random seed: the same seed makes the same scans")
+    s.add_argument("--workers", type=int, default=1, help="processor cores to use")
+    s.add_argument("--kind", default="PvP", choices=["PvP", "PvT", "tiebar"],
+                   help="scan kind: plunger vs plunger, plunger vs tunnel gate, or tie bar")
     s.set_defaults(fn=cmd_simulate)
 
-    s = sub.add_parser("train", help="train a model version")
-    s.add_argument("--synthetic", nargs="*", default=[])
-    s.add_argument("--kind", default="PvP", choices=["PvP", "PvT", "tiebar"])
-    s.add_argument("--no-real", action="store_true", help="ignore labelled real scans")
-    s.add_argument("--size", type=int, default=96)
-    s.add_argument("--base", type=int, default=16)
-    s.add_argument("--epochs", type=int, default=12)
-    s.add_argument("--ensemble", type=int, default=3)
-    s.add_argument("--batch-size", type=int, default=32)
-    s.add_argument("--lr", type=float, default=2e-3)
-    s.add_argument("--notes", default="")
+    s = sub.add_parser("train", help="train a model")
+    s.add_argument("--synthetic", nargs="*", default=[], help="names of simulated scan sets")
+    s.add_argument("--kind", default="PvP", choices=["PvP", "PvT", "tiebar"],
+                   help="scan kind the model is for")
+    s.add_argument("--no-real", action="store_true", help="do not use your labelled scans")
+    s.add_argument("--size", type=int, default=96, help="image size of the scan sets, in pixels")
+    s.add_argument("--base", type=int, default=16, help="network size (12 small, 16, 24 large)")
+    s.add_argument("--epochs", type=int, default=12, help="passes over the training data")
+    s.add_argument("--ensemble", type=int, default=3,
+                   help="number of networks trained and averaged")
+    s.add_argument("--batch-size", type=int, default=32,
+                   help="scans per training step (lower it if a GPU runs out of memory)")
+    s.add_argument("--lr", type=float, default=2e-3, help="learning rate")
+    s.add_argument("--notes", default="", help="notes stored with the model")
     s.add_argument("--name", default="", help="the model's name (default: scan kind and date)")
     s.add_argument("--activate", action="store_true", help="put the new model in use")
     s.add_argument("--device", default="auto",
@@ -336,7 +353,7 @@ def main(argv=None) -> None:
     s = sub.add_parser("train-job", help="train from a training-job file (on another computer)",
                        description="Run a training-job file made on the Train page (Train on "
                        "another computer, Download the job file) or with `chargecell train "
-                       "--job-file`. Writes a model file (.zip) to bring back to the GUI.")
+                       "--job-file`. Writes a model file (.zip) to bring back and add on the Models page.")
     s.add_argument("file", help="the training-job file (.zip)")
     s.add_argument("--out", default=None, help="model file or folder to write (default: next "
                                                 "to the job file)")
@@ -344,11 +361,11 @@ def main(argv=None) -> None:
                    help="auto (a GPU if there is one), cpu, cuda, cuda:1 or mps")
     s.set_defaults(fn=cmd_train_job)
 
-    s = sub.add_parser("worker", help="train jobs sent from the GUI on this computer",
+    s = sub.add_parser("worker", help="train the jobs sent from the Train page on this computer",
                        description="Run on the computer that should do the training (for example "
                        "one with a GPU). Copy the exact command, with the server address and "
                        "token, from the Train page (Train on another computer).")
-    s.add_argument("--server", required=True, help="address of the ChargeCell GUI, e.g. "
+    s.add_argument("--server", required=True, help="address of ChargeCell's web page, e.g. "
                                                     "http://lab-pc:8765")
     s.add_argument("--token", required=True, help="the token shown on the Train page")
     s.add_argument("--device", default="auto",
@@ -375,42 +392,46 @@ def main(argv=None) -> None:
     s.add_argument("--out", default=None, help="export: file or folder to write to")
     s.set_defaults(fn=cmd_models)
 
-    s = sub.add_parser("calibrate", help="recalibrate a model's FOUND threshold")
+    s = sub.add_parser("calibrate", help='set again how sure a model must be to say "found"')
     s.add_argument("--model", required=True, help="model name or id in the workspace")
     s.add_argument("--target", type=float, default=None,
-                   help="FOUND precision to reach (default: the model's training target)")
+                   help='share of "found" answers that must be right, e.g. 0.99 (default: the '
+                        "model's own setting)")
     s.add_argument("--held-out", nargs="*", default=[],
-                   help="synthetic datasets never used in training (default: the model's own "
-                        "validation split)")
+                   help="simulated scan sets never used in training (default: the part of the "
+                        "training data the model was tested on)")
     s.set_defaults(fn=cmd_calibrate)
 
     s = sub.add_parser("analyze", help="analyse scan files")
-    s.add_argument("files", nargs="+")
-    s.add_argument("--x-gate", default=None)
-    s.add_argument("--y-gate", default=None)
-    s.add_argument("--device", default="default")
-    s.add_argument("--cooldown", default="")
+    s.add_argument("files", nargs="+", help="scan files, or chargecell/1 request files (.json)")
+    s.add_argument("--x-gate", default=None, help="gate swept along x (if the file does not say)")
+    s.add_argument("--y-gate", default=None, help="gate swept along y (if the file does not say)")
+    s.add_argument("--device", default="default", help="device name (for its settings)")
+    s.add_argument("--cooldown", default="", help="cooldown name, e.g. CD7")
     s.add_argument("--save", action="store_true", help="also store the scans in the workspace")
     s.add_argument("--json", action="store_true", help="print chargecell/1 responses as JSON")
     s.add_argument("--out", default=None, help="write <name>.response.json files to this folder")
     s.set_defaults(fn=cmd_analyze)
 
-    s = sub.add_parser("navigate", help="evaluate guidance on simulated devices")
-    s.add_argument("--devices", type=int, default=10)
-    s.add_argument("--max-scans", type=int, default=8)
-    s.add_argument("--seed", type=int, default=0)
-    s.add_argument("--kind", default="PvP", choices=["PvP", "PvT", "tiebar"])
+    s = sub.add_parser("navigate", help="try the advice on simulated practice devices")
+    s.add_argument("--devices", type=int, default=10, help="number of practice devices")
+    s.add_argument("--max-scans", type=int, default=8, help="scans allowed per device")
+    s.add_argument("--seed", type=int, default=0, help="random seed for the devices")
+    s.add_argument("--kind", default="PvP", choices=["PvP", "PvT", "tiebar"], help="scan kind")
     s.set_defaults(fn=cmd_navigate)
 
-    s = sub.add_parser("schema", help="print the chargecell/1 JSON Schema")
+    s = sub.add_parser("schema", help="print the format of the chargecell/1 messages")
     s.set_defaults(fn=cmd_schema)
 
-    s = sub.add_parser("runs", help="list tune-up runs, show one as a graded tree, or --stats")
-    s.add_argument("run_id", nargs="?", default=None)
-    s.add_argument("--device", default=None)
-    s.add_argument("--source", default=None, choices=["backend", "gui", "cli", "practice"])
-    s.add_argument("--stats", action="store_true", help="success rates and failure modes")
-    s.add_argument("--json", action="store_true")
+    s = sub.add_parser("runs", help="the history: list tune-up runs, show one, or --stats")
+    s.add_argument("run_id", nargs="?", default=None, help="show this run step by step")
+    s.add_argument("--device", default=None, help="only runs on this device")
+    s.add_argument("--source", default=None, choices=["backend", "gui", "cli", "practice"],
+                   help="only runs recorded from: measurement software (backend), the web page "
+                        "(gui), the command line, or practice devices")
+    s.add_argument("--stats", action="store_true",
+                   help="how often each goal was reached, and where things went wrong")
+    s.add_argument("--json", action="store_true", help="print JSON instead of text")
     s.set_defaults(fn=cmd_runs)
 
     a = p.parse_args(argv)

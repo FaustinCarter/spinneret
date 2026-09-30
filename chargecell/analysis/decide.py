@@ -110,7 +110,7 @@ def pvp_found_gates(p: dict, S: int | None = None) -> list[str]:
         checks.append("the empty region is not visible for both dots")
     cell = _largest_component((na == 1) & (nb == 1)) if (ref_a and ref_b) else None
     if cell is None or cell.sum() < 4 or cell.mean() < 0.005:
-        checks.append("no (1,1) region was segmented")
+        checks.append("the model's electron counts show no (1,1) region")
     elif _edge_fraction(cell) > 0.4:
         checks.append("the (1,1) region is mostly cut off by the window edge")
     if ref_a and ref_b:
@@ -120,8 +120,8 @@ def pvp_found_gates(p: dict, S: int | None = None) -> list[str]:
                           "so it could be an occupied cell cut off by the window edge")
         hidden = hidden_line_in_empty(na, nb, p["lines_p"])
         if hidden:
-            checks.append(f"the line map shows a possible faint transition inside the empty "
-                          f"region of {hidden}, so electrons may be miscounted")
+            checks.append(f"there may be a faint charge line inside the empty region of "
+                          f"{hidden}, so electrons may be miscounted")
     return checks
 
 
@@ -137,7 +137,7 @@ def found_gates(kind: str):
 
 
 UNCONFIRMED_TEXT = ("The (1,1) cell appears to be in the window and every check passed, but the "
-                    "model's confidence is below its calibrated threshold.")
+                    "model is not sure enough to call it found.")
 
 
 def held_back_by(checks: list[str], gate_fails: list[str]) -> str | None:
@@ -230,7 +230,8 @@ def analyze(ws: Workspace, scan: Scan, model_id: str | None = None,
     demoted, checks, gate_fails = False, [], []
     if status == schema.FOUND:
         if sp[0] < tau:
-            checks.append(f"confidence {sp[0]:.2f} is below the calibrated threshold {tau:.2f}")
+            checks.append(f"the model is {100 * sp[0]:.3g}% sure, and it needs to be "
+                          f"{100 * tau:.3g}% sure to say found")
         gate_fails = pvp_found_gates(p, S)
         checks += gate_fails
         if checks:

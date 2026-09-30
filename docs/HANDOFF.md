@@ -1,7 +1,8 @@
 # Handoff: state of ChargeCell
 
 Updated 2026-09-30 by the second Claude session (Claude Code, cloud container with 4 CPU cores,
-15 GB RAM, no GPU). The first build (2026-09-29, claude.ai sandbox) is summarised in section 1.
+15 GB RAM, no GPU), last after the model-switching, remote-training and interface work (section
+4.2). The first build (2026-09-29, claude.ai sandbox) is summarised in section 1.
 Read this first, then `docs/CODEMAP.md` before changing code.
 
 ## 1. What the user asked for
@@ -29,6 +30,12 @@ only where they clearly help); packaging for GitHub and Claude Code.
 - Gate names follow the HRL convention: P1, P2, ... plungers; X1, X2, ... exchange gates (T
   tunnel gates and M sensors as in HRL's papers).
 - "Let's do the PvT tie-bar models next." → done (DESIGN sections 8, 9).
+- Later in the session: "focus less on getting the model training right, and more on: making
+  sure we can easily switch models; making sure it's easy to train on gpu that might not [be] on
+  the same machine as the web ui; making sure the user interface is really easy to use and
+  intuitive; making sure that any text/instructions/labels are jargon free and use simple plain
+  technical English. For technical terms that are unavoidable, add a glossary to the readme."
+  → done (section 4.2; DESIGN 13; DECISIONS 33-35).
 
 Answers to the first session's open questions: keep the name ChargeCell; train here on CPU
 (PvP at 96 px, 3 members); bundled weights in **Git LFS**; **no license** for now; acceptance bar
@@ -57,10 +64,14 @@ hole-device labelling were not chosen.
 | FOUND threshold calibrated on the final decision; test-time augmentation; `chargecell calibrate` | Done, tested (DECISIONS 27, 28) |
 | Confirmation rescan for a FOUND held back only by confidence (all kinds, protocol purpose `confirm`) | Done, tested (DECISIONS 30) |
 | Simulator "too noisy" labels use the noise visible in the image | Done; all three kinds retrained on it (DECISIONS 31) |
+| Model versions: names, plain test summaries, switching, model files (zip/folder), Models page, `chargecell models` | Done, tested (`test_models.py`) |
+| Training on another computer: training-job files, `chargecell worker` / `train-job`, GPU selection, Train page | Done, tested (`test_remote.py`); checked over real HTTP on CPU only (no GPU here) |
+| Web page: Home, Models, four-step Train page, plain-language labels and advice, README glossary | Done, browser-checked (`scripts/gui_check.py`) |
 
 ## 3. Verified results (reproducible)
 
-- `pytest -q`: 37 tests (about 3 minutes on 4 cores; `test_kinds.py` trains tiny models).
+- `pytest -q`: 43 tests (about 1.5-3 minutes on 4 cores; `test_kinds.py` and `test_remote.py`
+  train tiny models).
 - Guidance with perfect perception, 30 practice devices each (`python scripts/nav_trace.py
   --oracle --bench --kind <kind>`), every FOUND correct: PvP 30/30 (median 3 scans; 30/30 also
   with `--no-prior`), PvT 30/30 (median 3 since the stricter anchoring; half the devices start
@@ -159,7 +170,33 @@ Section 3 has the numbers. What was learned, in the order it matters:
    (open question 1). To bundle: `bundle()` in `scripts/train_starter.py`, then check README and
    OPERATOR_GUIDE ("installed on first start").
 
-### 4.2 Done this session: automation tree / audit log
+### 4.2 Done this session: switching models, training elsewhere, a plainer interface
+
+What the user asked for last (section 1), and what exists now:
+
+- **Switching models.** Models page (per scan kind: the model in use with plain test results,
+  other versions with Use / Rename / Download / Delete, Add a model file from a zip or a folder,
+  an offer to re-analyse after switching); `chargecell models list|use|add|export|rename|delete`;
+  HTTP endpoints in CODEMAP §4. Model files are validated before anything changes.
+- **Training on a GPU elsewhere.** Train page → "Another computer": the page shows the
+  `chargecell worker --server ... --token ...` command (or, when ChargeCell listens only on
+  127.0.0.1, the two ways to connect: `--host 0.0.0.0` on a trusted network, or an SSH tunnel),
+  follows the remote progress, and can cancel or retry. No network: download the training-job
+  file, `chargecell train-job` on the GPU computer, add the model file. `--device auto|cuda|mps|
+  cpu`. **Not yet run on a real GPU** (this container has none): the CUDA path is the standard
+  PyTorch one (model and batches moved to the device, pinned memory, loader workers), but the
+  first real GPU run should be watched (open question 7).
+- **Interface.** Home page (tasks, getting-started checklist, models in use), a four-step Train
+  page, renamed navigation (History, Simulated scans, Device settings), plain words in the GUI,
+  the advice texts (`recommend.py`, `pvt.py`, `tiebar.py`), the reason texts and the CLI help;
+  README rewritten with sections on switching models and training elsewhere, and a glossary;
+  OPERATOR_GUIDE updated.
+
+Possible follow-ups: a model comparison view (two versions side by side on the same scans);
+showing on the Train page when a worker last asked for work (workers are only visible once they
+claim a job); a first-run wizard for Device settings.
+
+### 4.2b Done this session: automation tree / audit log
 
 Built as proposed (DESIGN §12, PROTOCOL "Runs", DECISIONS 23-24): `runs/<id>.json` trees of
 run → stage → measure → analysis/advice/review, plus actions and notes; graded when recorded;
@@ -195,6 +232,7 @@ tie-bar coupling ratio against independent tunnel-coupling measurements.
 ### 4.6 P3: Housekeeping
 
 - Starlette's TestClient warns that httpx will be replaced by httpx2.
+- `<workspace>/tmp/` collects uploads and model-file exports; nothing cleans it yet.
 - CI does not fetch LFS weights (tests do not need them; saves LFS bandwidth).
 
 ## 5. Known issues and sharp edges
@@ -232,6 +270,14 @@ tie-bar coupling ratio against independent tunnel-coupling measurements.
 - **Label drafts from occupancy maps** keep boundaries that only clip a window corner (2+
   points); dropping them used to shift every count in the window by one. Maps with charge jumps
   (non-monotonic occupancy) still cannot be represented by boundary polylines.
+- **Remote training.** The worker token is in `<workspace>/worker_token` (delete it to make a
+  new one; running workers then need the new command). A job file is deleted when its model
+  comes back or the job is cancelled; a failed job keeps it for "Try again". The web page has no
+  login: never start it with `--host 0.0.0.0` on an untrusted network. The worker bypasses web
+  proxies only for local and private addresses (`worker._is_local`).
+- **Words on screen.** Page ids in URLs and code are unchanged (`runs`, `synthetic`, `device`)
+  while the navigation says History, Simulated scans, Device settings. `scripts/gui_check.py`
+  clicks some buttons by their text; update it when renaming buttons.
 - Earlier items still true: the line-map lattice joins reservoir segments through interdot
   segments, rejects spacings far from the prior/history, and never shrinks a window on an
   unmeasured spacing (don't undo these together); only measured spacings are stored in
@@ -243,7 +289,7 @@ tie-bar coupling ratio against independent tunnel-coupling measurements.
 1. **Starter models** (sections 3 and 4.1): none meets the acceptance bar yet. Bundle the
    conservative PvP model now (no wrong FOUND in 60 closed loops, finds (1,1) on half the
    devices), or wait until a retrained one reaches 70%?
-2. **Automation tree**: it records and grades what the backend does (4.2). Should ChargeCell
+2. **Automation tree**: it records and grades what the backend does (4.2b). Should ChargeCell
    also plan the sequence of stages per qubit (PvT → PvP → tie bar), or leave that to the
    backend?
 3. **Tie-bar coupling target**: what range of coupling ratio (or t_c in µeV, with lever arms and
@@ -251,13 +297,18 @@ tie-bar coupling ratio against independent tunnel-coupling measurements.
 4. **Real data**: when available, a few scans of each kind (any format) from two cooldowns.
 5. **Device facts** that are still unknown to ChargeCell: which T gate serves which plunger on
    your devices, and whether interior dots need their own loading procedure.
+6. **The interface**: is the four-step Train page and the Home checklist what you had in mind?
+   Are there words in the GUI or the glossary that your operators still find unclear?
+7. **GPU training**: which computer and GPU will train (NVIDIA with CUDA, or Apple)? Can it reach
+   the GUI computer over the network, or should the SSH tunnel / job-file route be the default
+   in the instructions?
 
 ## 7. How to resume
 
 ```bash
 git lfs install && git lfs pull
 pip install -e ".[dev]"
-pytest -q                                              # expect 37 passed
+pytest -q                                              # expect 43 passed
 python scripts/nav_trace.py --oracle --bench --kind PvP   # and PvT, tiebar: expect 30/30
 chargecell -w /tmp/demo serve --no-browser             # GUI; practice devices on the Scans page
 ```

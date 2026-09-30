@@ -46,17 +46,19 @@ NOT_IN_WINDOW_REASONS = REASONS[1:5]
 UNINTERPRETABLE_REASONS = REASONS[5:]
 
 REASON_TEXT = {
-    "none": "The (1,1) cell is in the window and the electron count is anchored.",
-    "no_transitions": "No charge transitions are visible in this window.",
+    "none": "The (1,1) cell is in the window, and the electrons are counted from an empty "
+            "region.",
+    "no_transitions": "No charge lines are visible in this window.",
     "occupancy_too_low": "The empty region is visible, but the window stops before one "
                          "electron is loaded in each dot.",
-    "no_reference": "Transitions are visible, but there is no empty region to count "
+    "no_reference": "Charge lines are visible, but there is no empty region to count "
                     "electrons from.",
     "partially_visible": "The (1,1) cell is only partly inside the window.",
-    "low_snr": "The noise is too high relative to the transition contrast.",
+    "low_snr": "The noise is too large compared with the charge lines.",
     "sensor_insensitive": "The charge sensor has lost sensitivity over much of the scan.",
     "dots_merged": "The pattern looks like a single dot: the two dots are too strongly coupled.",
-    "charge_instability": "The pattern jumps between sweeps (charge switching).",
+    "charge_instability": "The pattern jumps from one sweep to the next: charges switch during "
+                          "the scan.",
     "resolution_too_coarse": "Too few points per electron to resolve the charge cells.",
 }
 

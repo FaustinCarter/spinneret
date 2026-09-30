@@ -139,8 +139,8 @@ def run_worker(server, device: str = "auto", once: bool = False, poll: float = 1
             path = server.download(f"/api/worker/jobs/{jid}/job-file", tmp / "job.zip")
             model = run_job_file(path, tmp / "model.zip", device=device, progress=progress)
             res = server.upload(f"/api/worker/jobs/{jid}/model", model)
-            log(f"Finished: the model \"{res.get('display_name', '')}\" is back on the GUI "
-                "computer.")
+            log(f"Finished: the model \"{res.get('display_name', '')}\" is back on the "
+                "computer that runs ChargeCell's web page (see its Models page).")
             done += 1
         except JobCancelled:
             server.post_json(f"/api/worker/jobs/{jid}/failed",

@@ -54,26 +54,34 @@ const annotatorName = () => localStorage.getItem("cc-annotator") || "";
 
 const STATUS_LABEL = {
   FOUND: "(1,1) found",
-  NOT_IN_WINDOW: "(1,1) not in this window",
-  UNINTERPRETABLE: "Can't interpret this scan",
+  NOT_IN_WINDOW: "(1,1) is not in this scan",
+  UNINTERPRETABLE: "Can't read this scan",
 };
 const KIND_STATUS_LABEL = {
-  PvT: { FOUND: "One-electron point found", NOT_IN_WINDOW: "Not in this window", UNINTERPRETABLE: "Can't interpret this scan" },
-  tiebar: { FOUND: "Tie bar found", NOT_IN_WINDOW: "Tie bar not in this window", UNINTERPRETABLE: "Can't interpret this scan" },
+  PvT: { FOUND: "One-electron point found", NOT_IN_WINDOW: "Not in this scan", UNINTERPRETABLE: "Can't read this scan" },
+  tiebar: { FOUND: "Tie bar found", NOT_IN_WINDOW: "Tie bar is not in this scan", UNINTERPRETABLE: "Can't read this scan" },
 };
 const statusLabel = (kind, st) => (KIND_STATUS_LABEL[kind] || STATUS_LABEL)[st];
+/* The three scan kinds, one model each (kinds.py has the same names). */
+const KINDS = {
+  PvP: { short: "Plunger vs plunger", goal: "Find the (1,1) cell of a pair of dots.", noun: "(1,1) cell" },
+  PvT: { short: "Plunger vs tunnel gate", goal: "Load exactly one electron with a good tunnel rate.", noun: "one-electron point" },
+  tiebar: { short: "Tie bar", goal: "Zoom on the (1,1)-(2,0) line: find the tie bar and its two triple points for readout.", noun: "tie bar" },
+};
 const KIND_LABEL = { PvP: "Plunger vs plunger", PvT: "Plunger vs tunnel gate", tiebar: "Tie bar (zoom on (1,1)-(2,0))" };
-const SHORT_STATUS = { FOUND: "Found", NOT_IN_WINDOW: "Not in window", UNINTERPRETABLE: "Uninterpretable" };
+const kindShort = k => (KINDS[k || "PvP"] || { short: k }).short;
+const SCAN_SOURCE = { api: "measurement software", file: "file", virtual_device: "practice device", synthetic: "simulated" };
+const SHORT_STATUS = { FOUND: "Found", NOT_IN_WINDOW: "Not in view", UNINTERPRETABLE: "Can't read" };
 const REASON_LABEL = {
-  none: "(1,1) visible and anchored",
-  no_transitions: "No transitions visible",
-  occupancy_too_low: "Window stops before (1,1)",
-  no_reference: "No empty region to count from",
-  partially_visible: "(1,1) cut off by the edge",
+  none: "(1,1) in view, electrons counted from empty",
+  no_transitions: "No charge lines visible",
+  occupancy_too_low: "Scan stops before (1,1)",
+  no_reference: "No empty region to count electrons from",
+  partially_visible: "(1,1) cut off at the edge",
   low_snr: "Too noisy",
-  sensor_insensitive: "Sensor lost sensitivity",
-  dots_merged: "Dots merged (one-dot pattern)",
-  charge_instability: "Charge jumps between sweeps",
+  sensor_insensitive: "Sensor not sensitive",
+  dots_merged: "Dots merged into one",
+  charge_instability: "Charges jump during the scan",
   resolution_too_coarse: "Too few points",
   tunnel_rate_too_low: "Tunnel gate too closed",
   reservoir_too_open: "Tunnel gate too open",
@@ -92,16 +100,23 @@ const KIND_REASONS = {
 };
 const reasonsFor = (kind, st) => (KIND_REASONS[kind] || REASONS_BY_STATUS)[st] || [];
 const KIND_REASON_LABEL = {
-  PvT: { none: "Empty dot, two loading lines, clean tunnel range", occupancy_too_low: "Second loading line not in view",
+  PvT: { none: "Empty dot, two loading lines, clean tunnel-gate range", occupancy_too_low: "Second loading line not in view",
          no_reference: "Empty dot not in view", no_transitions: "No loading lines visible" },
-  tiebar: { none: "Tie bar and both triple points in view", partially_visible: "Tie bar cut off by the edge" },
+  tiebar: { none: "Tie bar and both triple points in view", partially_visible: "Tie bar cut off at the edge" },
 };
 const reasonLabel = (kind, r) => (KIND_REASON_LABEL[kind] || {})[r] || REASON_LABEL[r] || r;
 const FAMILY_COLOR = { a: "#2E5AAC", b: "#13808A", interdot: "#17202B", spectator: "#7A4FB5", sensor: "#8A7A1E" };
 const FAMILIES = ["a", "b", "interdot", "spectator", "sensor"];
 
 // ---------------------------------------------------------------- shared state
-const S = { scans: [], cache: new Map(), status: null, running: new Set(), pendingDraft: null };
+const S = { scans: [], cache: new Map(), status: null, running: new Set(), pendingDraft: null, models: [] };
+
+async function loadModels() {
+  S.models = await api("/api/models", { quiet: true }) || [];
+  return S.models;
+}
+const modelName = id => ((S.models || []).find(m => m.id === id) || {}).display_name || shortId(id);
+const inUse = kind => (S.models || []).find(m => m.in_use && (m.kind || "PvP") === kind);
 
 async function loadScanList() {
   S.scans = await api("/api/scans");
@@ -148,7 +163,7 @@ function plotBar(plot, extra = []) {
   };
   viewSeg.append(
     h("button", { "data-m": "signal", class: "on", onclick: () => setMode("signal") }, "Signal"),
-    h("button", { "data-m": "gradient", onclick: () => setMode("gradient"), title: "Gradient magnitude: makes faint lines visible (G)" }, "Gradient"));
+    h("button", { "data-m": "gradient", onclick: () => setMode("gradient"), title: "Shows where the signal changes fastest: faint lines stand out (G)" }, "Edges"));
   const bar = h("div", { class: "plot-bar" },
     viewSeg,
     h("label", {}, "Colours", h("select", { onchange: e => plot.setCmap(e.target.value) },
@@ -158,7 +173,7 @@ function plotBar(plot, extra = []) {
     h("label", { class: "check" }, h("input", { type: "checkbox", onchange: e => plot.setInvert(e.target.checked) }), "Invert"),
     ...extra,
     h("span", { class: "spacer" }),
-    h("button", { onclick: () => plot.resetView(), title: "Scroll to zoom, shift-drag to pan" }, "Reset view"));
+    h("button", { onclick: () => plot.resetView(), title: "Scroll to zoom, Shift-drag to move" }, "Reset view"));
   bar.setMode = setMode;
   return bar;
 }
@@ -264,24 +279,24 @@ pages.review = {
     this.side = h("div", { class: "stack" });
     root.append(
       h("header", {}, h("h1", {}, "Review"), this.picker,
-        h("button", { class: "primary", onclick: e => this.analyze(e) }, "Analyse"),
+        h("button", { class: "primary", onclick: e => this.analyze(e), title: "Let the model read this scan" }, "Analyse"),
         h("span", { class: "spacer" }),
-        h("button", { onclick: () => startPractice() }, "New practice device")),
+        practiceButtons()),
       this.body = h("div", { class: "grid-2" },
         h("div", {}, h("div", { class: "plot-wrap" }, this.canvas,
           plotBar(this.plot, [toggle("cells", "Cells"), toggle("lines", "Lines"), toggle("next", "Next scan")]))),
         this.side));
     this.empty = h("div", { class: "panel empty", hidden: true },
       h("h2", {}, "No scans yet"),
-      h("p", {}, "Import scan files on the Scans page, send scans from your measurement setup through the ChargeCell API, or start a practice device to try the whole loop on a simulated triple dot."),
+      h("p", {}, "Import scan files on the Scans page, or let your measurement software send them (see PROTOCOL.md). To try ChargeCell first, start a practice device: a simulated device that you can scan as often as you like."),
       h("div", { class: "row" },
-        h("a", { class: "button primary", href: "#/scans" }, "Import scans"),
-        h("button", { onclick: () => startPractice() }, "New practice device")));
+        h("a", { class: "button primary", href: "#/scans/import" }, "Import scans"),
+        practiceButtons()));
     root.append(this.empty);
   },
 
   async enter(id) {
-    await loadScanList();
+    await Promise.all([loadScanList(), loadModels()]);
     const has = S.scans.length > 0;
     this.body.hidden = !has; this.empty.hidden = has; this.picker.hidden = !has;
     if (!has) return;
@@ -397,25 +412,34 @@ pages.review = {
     const ref = (r && r.run) || (summary && summary.run);
     const info = h("div", { class: "panel small" },
       h("div", { class: "row" }, h("b", {}, `${meta.x_gate} vs ${meta.y_gate}`), h("span", { class: "muted" }, `${sc.nx} x ${sc.ny} points`)),
-      h("div", { class: "muted" }, `${meta.device}${meta.cooldown ? " \u00b7 cooldown " + meta.cooldown : ""} \u00b7 ${meta.source} \u00b7 ${when(meta.created)}`),
+      h("div", { class: "muted" }, `${meta.device}${meta.cooldown ? " \u00b7 cooldown " + meta.cooldown : ""} \u00b7 ${SCAN_SOURCE[meta.source] || meta.source} \u00b7 ${when(meta.created)}`),
       meta.notes ? h("div", { class: "muted" }, meta.notes) : null,
-      ref ? h("div", {}, h("a", { href: `#/runs/${encodeURIComponent(ref.run_id)}` }, "Show this scan's run (audit log)")) : null);
+      ref ? h("div", {}, h("a", { href: `#/runs/${encodeURIComponent(ref.run_id)}` }, "Show this scan in the History")) : null);
+    const kind = meta.kind || "PvP", using = inUse(kind);
     if (!r) {
       side.replaceChildren(h("div", { class: "panel decision" },
         h("div", { class: "status-word status-none" }, "Not analysed yet"),
-        h("p", {}, "Run the model to find the (1,1) cell or get directions for the next scan."),
-        h("button", { class: "primary", onclick: e => this.analyze(e) }, "Analyse this scan"),
-        S.status && !S.status.active_model ? h("p", { class: "warn" }, "No trained model yet. Train one on the Train page first.") : null), info);
+        h("p", {}, `Let the model read this ${kindShort(kind).toLowerCase()} scan: it says whether the ${KINDS[kind].noun} is in view, and where to scan next if not.`),
+        using ? h("div", { class: "stack", style: "gap:6px" },
+          h("div", {}, h("button", { class: "primary", onclick: e => this.analyze(e) }, "Analyse this scan")),
+          h("div", { class: "small muted" }, "Model: ", using.display_name, " \u00b7 ", h("a", { href: "#/models" }, "Change model")))
+          : h("div", { class: "stack", style: "gap:6px" },
+            h("p", { class: "warn", style: "margin:0" }, `There is no model for ${kindShort(kind).toLowerCase()} scans yet.`),
+            h("div", { class: "row" }, h("a", { class: "button primary", href: "#/models" }, "Add a model"),
+              h("a", { class: "button", href: `#/train/${kind}` }, "Train one")))), info);
       return;
     }
     const rec = r.recommendation || {};
     const flags = h("div", { class: "row" },
-      h("span", { class: "muted small" }, `Confidence ${pct(r.confidence)}`),
-      r.needs_review ? h("span", { class: "flag review", title: "The model is unsure or its checks disagreed. A person should look." }, "Needs review") : h("span", { class: "flag ok" }, "Checks passed"));
+      (r.demotion && r.demotion.length) ? null : h("span", { class: "muted small" }, `The model is ${pct(r.confidence)} sure`),
+      r.needs_review ? h("span", { class: "flag review", title: "The model is unsure or its checks disagreed." }, "Please check by eye") : h("span", { class: "flag ok" }, "Checks passed"));
     const decision = h("div", { class: `panel decision ${r.status}` },
       h("div", { class: `status-word status-${r.status}` }, statusLabel(r.kind, r.status)),
       h("p", {}, r.reason_text), flags,
-      (r.demotion && r.demotion.length) ? h("p", { class: "warn small" }, "Held back from FOUND because " + r.demotion.join("; ") + ".") : null);
+      (r.demotion && r.demotion.length) ? h("p", { class: "warn small" }, "Not called found because " + r.demotion.join("; ") + ".") : null,
+      h("div", { class: "small muted", style: "margin-top:6px" }, "Analysed with ", h("b", {}, modelName(r.model_id)),
+        r.model_id !== (using || {}).id ? h("span", {}, using ? `, which is no longer in use. Analyse again to use ${using.display_name}.` : ".") : null,
+        " \u00b7 ", h("a", { href: "#/models" }, "Change model")));
 
     const todo = h("div", { class: "panel" }, h("h2", {}, "What to do next"),
       h("p", { class: "headline" }, rec.headline || ""),
@@ -424,7 +448,7 @@ pages.review = {
     if (win) {
       const key = rec.next_window ? "next_window" : rec.tiebar_window ? "tiebar_window" : "retune_window";
       const row = (g, a) => h("tr", {}, h("td", {}, h("b", {}, g)), h("td", { class: "num" }, V4(a[0])), h("td", {}, "to"),
-        h("td", { class: "num" }, V4(a[1])), h("td", {}, "V"), h("td", { class: "num muted" }, `${a[2]} pts`));
+        h("td", { class: "num" }, V4(a[1])), h("td", {}, "V"), h("td", { class: "num muted" }, `${a[2]} points`));
       todo.append(h("div", { class: "window-box" },
         h("div", { class: "muted small" }, { tiebar_window: "Tie-bar scan window (readout setup)", retune_window: "Rescan after changing the exchange gate" }[key] || "Next scan window"),
         h("table", {}, row(win.x_gate, win.x), row(win.y_gate, win.y))),
@@ -437,26 +461,26 @@ pages.review = {
           meta.source === "virtual_device" ? h("button", { class: "primary", onclick: e => this.runNext(e, key) }, key === "tiebar_window" ? "Take the tie-bar scan on the practice device" : "Measure it on the practice device") : null));
     }
     if (rec.warnings && rec.warnings.length) todo.append(h("div", { style: "margin-top:10px" }, rec.warnings.map(w => h("p", { class: "warn" }, w))));
-    if (rec.confidence) todo.append(h("p", { class: "muted small", style: "margin-top:8px" }, `Guidance confidence: ${rec.confidence}. Basis: ${rec.basis || "n/a"}.`));
+    if (rec.confidence) todo.append(h("p", { class: "muted small", style: "margin-top:8px" }, `How sure this advice is: ${rec.confidence}. Based on: ${rec.basis || "the scan alone"}.`));
 
-    const specs = (r.spectators || []).length ? h("div", { class: "panel small" }, h("h3", { style: "margin-top:0" }, "Spectator dots"),
+    const specs = (r.spectators || []).length ? h("div", { class: "panel small" }, h("h3", { style: "margin-top:0" }, "Neighbouring dots (spectators)"),
       r.spectators.map(sp => h("div", {}, h("b", {}, sp.gate), ` at ${sp.voltage != null ? V4(sp.voltage) + " V" : "unknown voltage"}: `,
-        sp.status === "verified" ? h("span", { class: "flag ok" }, "one electron (consistent with an earlier scan)") : h("span", { class: "flag" }, sp.status)))) : null;
+        sp.status === "verified" ? h("span", { class: "flag ok" }, "one electron (matches an earlier scan)") : h("span", { class: "flag" }, sp.status === "unverified" ? "not checked yet" : sp.status)))) : null;
 
     const teach = h("div", { class: "panel" }, h("h2", {}, "Teach the model"),
-      h("p", { class: "small muted" }, "Your corrections become training data. Accept the result if it is right, or fix it in the labeller."),
+      h("p", { class: "small muted" }, "Your answers become training data for the next model. If the result is right, save it as a label; if not, correct it on the Label page."),
       h("div", { class: "row" },
-        h("button", { onclick: () => this.accept() }, "Accept as label"),
-        h("button", { onclick: () => { S.pendingDraft = this.id; go("label", this.id); } }, "Correct in labeller")),
+        h("button", { onclick: () => this.accept() }, "It's right: save as label"),
+        h("button", { onclick: () => { S.pendingDraft = this.id; go("label", this.id); } }, "Correct it")),
       meta.source === "virtual_device" ? h("div", { style: "margin-top:10px" }, h("button", { onclick: e => this.reveal(e) }, "Reveal the true answer")) : null);
 
-    const probs = r.probabilities ? h("details", { class: "panel" }, h("summary", {}, "Model details"),
+    const probs = r.probabilities ? h("details", { class: "panel" }, h("summary", {}, "How sure the model is"),
       h("div", { class: "probs", style: "margin-top:10px" },
         Object.entries(r.probabilities.status).map(([k, v]) => [h("span", {}, SHORT_STATUS[k]), h("div", { class: "bar" }, h("i", { style: `width:${v * 100}%` })), h("span", {}, pct(v))])),
       h("p", { class: "small muted", style: "margin-top:8px" },
         (r.probabilities.ref || []).length === 2 ? `Empty region visible: ${meta.x_gate} ${pct(r.probabilities.ref[0])}, ${meta.y_gate} ${pct(r.probabilities.ref[1])}. ` :
           (r.probabilities.ref || []).length === 1 ? `Empty dot visible: ${pct(r.probabilities.ref[0])}. ` : "",
-        `Ensemble disagreement ${r.uncertainty.mutual_info}. FOUND threshold ${r.found_threshold}. Model ${shortId(r.model_id)}.`),
+        `Disagreement between the model's networks: ${r.uncertainty.mutual_info} (0 means they agree). It says "found" only at ${pct(r.found_threshold)} confidence or more.`),
       r.quality && r.quality.warnings.length ? h("p", { class: "warn small" }, r.quality.warnings.join(" ")) : null) : null;
     side.replaceChildren(...[decision, todo, specs, teach, probs, info].filter(Boolean));
   },
@@ -476,14 +500,14 @@ pages.review = {
     if (t.target_V) more = ` The (1,1) centre is at ${xg} = ${V4(t.target_V[0])} V, ${yg} = ${V4(t.target_V[1])} V. Spectator holds ${t.spectator_occupancy} electron(s).`;
     if (t.operating_point_V) more = ` One electron at plunger ${V4(t.operating_point_V[0])} V, tunnel gate ${V4(t.operating_point_V[1])} V; electrons load cleanly for the tunnel gate between ${V4(t.T_open_V)} and ${V4(t.T_broad_V)} V.`;
     if (t.tp_low_V) more = ` Triple points at (${V4(t.tp_low_V[0])}, ${V4(t.tp_low_V[1])}) and (${V4(t.tp_high_V[0])}, ${V4(t.tp_high_V[1])}) V; coupling ratio ${t.coupling_ratio.toFixed(2)}.`;
-    e.target.replaceWith(h("p", { class: "small" }, h("b", {}, "Truth: "), `${statusLabel(kind, t.status)} (${REASON_LABEL[t.reason] || t.reason}).${more}`));
+    e.target.replaceWith(h("p", { class: "small" }, h("b", {}, "Truth: "), `${statusLabel(kind, t.status)} (${reasonLabel(kind, t.reason)}).${more}`));
   },
   async accept() {
     const r = this.analysis;
     const d = await api(`/api/scans/${encodeURIComponent(this.id)}/draft_from_model`, { method: "POST" });
     const ann = { ...d.annotation, status: r.status, reason: r.reason, annotator: annotatorName() || "operator" };
     await api(`/api/scans/${encodeURIComponent(this.id)}/annotation`, { method: "PUT", json: ann });
-    toast("Saved as a label. Check it in the labeller when you have a moment.");
+    toast("Saved as a label. You can look it over on the Label page later.");
     await loadScanList(); this.picker.update(this.id);
   },
 };
@@ -565,7 +589,7 @@ pages.label = {
     this.side = h("div", { class: "stack" });
     root.append(
       h("header", {}, h("h1", {}, "Label"), this.picker,
-        h("button", { onclick: () => this.draftFromModel(), title: "Start from the model's prediction and correct it" }, "Draft from model"),
+        h("button", { onclick: () => this.draftFromModel(), title: "Start from the model's reading of this scan and correct it" }, "Start from the model's reading"),
         h("button", { onclick: () => this.undo(), title: "Ctrl+Z" }, "Undo"),
         h("button", { onclick: () => this.redo(), title: "Ctrl+Shift+Z" }, "Redo"),
         h("button", { class: "danger", onclick: () => this.clearAll() }, "Clear lines")),
@@ -573,8 +597,8 @@ pages.label = {
         h("div", {}, h("div", { class: "tools" }, this.tools), h("div", { class: "plot-wrap" }, this.canvas, this.bar)),
         this.side));
     this.emptyEl = h("div", { class: "panel empty", hidden: true }, h("h2", {}, "Nothing to label"),
-      h("p", {}, "Import scans first. Scans the model is least sure about are listed here first."),
-      h("a", { class: "button primary", href: "#/scans" }, "Import scans"));
+      h("p", {}, "A label is your answer for a scan: where the charge lines are, how many electrons each region holds, and what the scan shows. Labels teach the next model. Import scans first; the ones the model is least sure about are offered first."),
+      h("a", { class: "button primary", href: "#/scans/import" }, "Import scans"));
     root.append(this.emptyEl);
     this.plot.hooks = {
       down: (p, e) => this.onDown(p, e), drag: p => this.onDrag(p), up: () => this.onUp(),
@@ -595,7 +619,8 @@ pages.label = {
         ? [toolBtn("a", "Dot A 1\u21922", "A", "a"), toolBtn("b", "Dot B 0\u21921", "B", "b")]
         : [toolBtn("a", "Dot A boundary", "A", "a"), toolBtn("b", "Dot B boundary", "B", "b")];
     this.tools.replaceChildren(toolBtn("v", "Select / move", "V", "v"), ...dots,
-      toolBtn("s", "Spectator line", "S", "s"), toolBtn("e", "Sensor artefact", "E", "e"));
+      toolBtn("s", "Spectator line", "S", "s"), toolBtn("e", "Sensor line", "E", "e"));
+    this.tools.title = "Spectator line: a charge line of a neighbouring dot that is not being swept. Sensor line: a line caused by the charge sensor itself, not by the dots.";
   },
 
   async enter(id) {
@@ -905,25 +930,25 @@ pages.label = {
         h("label", {}, "Reason", reasonSel), this.sugEl,
         h("label", {}, "Your name", h("input", { value: ann.annotator || "", oninput: e => { ann.annotator = e.target.value; localStorage.setItem("cc-annotator", e.target.value); } })),
         h("label", {}, "Notes", h("textarea", { rows: 2, oninput: e => { ann.notes = e.target.value; } }, ann.notes || "")),
-        h("label", { class: "check" }, h("input", { type: "checkbox", checked: !!ann.reviewed, onchange: e => { ann.reviewed = e.target.checked; } }), "Second check done"),
+        h("label", { class: "check" }, h("input", { type: "checkbox", checked: !!ann.reviewed, onchange: e => { ann.reviewed = e.target.checked; } }), "Checked by a second person"),
         h("div", { class: "row" },
           h("button", { class: "primary", onclick: () => this.save(false) }, "Save label"),
           h("button", { onclick: () => this.save(true) }, "Save and next")),
-        h("div", { class: "small muted" }, `${this.historyCount || 0} saved version(s). Origin: ${ann.origin || "manual"}.`)),
+        h("div", { class: "small muted" }, `${this.historyCount || 0} saved version(s). Started from: ${(ann.origin || "manual").startsWith("model") ? "the model's reading" : (ann.origin || "manual") === "manual" ? "scratch" : ann.origin === "api" ? "your measurement software" : ann.origin}.`)),
       h("details", { class: "panel" }, h("summary", {}, "Shortcuts"),
         h("div", { class: "shortcut-list", style: "margin-top:8px" },
-          h("kbd", {}, "A B S E"), h("span", {}, "draw dot A / dot B / spectator / sensor lines"),
+          h("kbd", {}, "A B S E"), h("span", {}, "draw dot A / dot B / spectator / sensor lines (L for loading lines)"),
           h("kbd", {}, "click"), h("span", {}, "add a point; double-click or Enter finishes"),
           h("kbd", {}, "V"), h("span", {}, "select and drag points; Alt-click inserts a point"),
           h("kbd", {}, "right-click"), h("span", {}, "delete a point"),
           h("kbd", {}, "Backspace"), h("span", {}, "remove last point / selected line"),
           h("kbd", {}, "Ctrl Z"), h("span", {}, "undo (Shift for redo)"),
-          h("kbd", {}, "G"), h("span", {}, "toggle gradient view"),
+          h("kbd", {}, "G"), h("span", {}, "switch to the edge view (makes faint lines stand out)"),
           h("kbd", {}, "scroll, Shift-drag"), h("span", {}, "zoom, pan"))),
-      h("div", { class: "panel" }, h("h2", {}, "Up next"),
-        h("p", { class: "small muted", style: "margin:0" }, "Unlabelled scans, most uncertain first. These teach the model the most."),
+      h("div", { class: "panel" }, h("h2", {}, "Scans to label next"),
+        h("p", { class: "small muted", style: "margin:0" }, "Scans without a label, the ones the model is least sure about first. These teach it the most."),
         h("div", { class: "queue" }, (this.queue || []).map(q => h("a", { href: `#/label/${encodeURIComponent(q.id)}`, class: q.id === this.id ? "current" : "" },
-          h("span", {}, `${when(q.created)} ${q.x_gate}/${q.y_gate}${(q.kind || "PvP") !== "PvP" ? " \u00b7 " + q.kind : ""}`),
+          h("span", {}, `${when(q.created)} ${q.x_gate}/${q.y_gate}${(q.kind || "PvP") !== "PvP" ? " \u00b7 " + kindShort(q.kind) : ""}`),
           h("span", { class: `pill ${(q.analysis || {}).status || ""}` }, q.analysis ? SHORT_STATUS[q.analysis.status] : "not analysed"))))));
     this.updateSuggestion();
   },
@@ -935,14 +960,14 @@ pages.label = {
     this.ann = { ...d.annotation, ...keep };
     this.setPreview(d);
     this.changed();
-    toast("Draft loaded from the model. Correct anything that is wrong, then save.");
+    toast("Loaded the model's reading. Correct anything that is wrong, then save.");
   },
 
   async save(next) {
     this.finish();
     const ann = this.ann;
     if (!ann.status) { toast("Choose an outcome before saving.", "error"); return; }
-    if (!ann.annotator) { toast("Add your name so labels can be traced.", "error"); return; }
+    if (!ann.annotator) { toast("Add your name, so everyone can see who made each label.", "error"); return; }
     const s = this.suggestion;
     const why = { PvT: "the empty dot, two loading lines and a clean tunnel-gate range", tiebar: "a complete tie bar inside the window" }[this.kind] ||
       "a complete (1,1) cell with an empty region for both dots";
@@ -973,9 +998,10 @@ pages.scans = {
     this.filterBar = h("div", { class: "row", style: "margin-bottom:10px" });
     root.append(
       h("header", {}, h("h1", {}, "Scans"),
-        h("button", { class: "primary", onclick: () => { this.importPanel.hidden = !this.importPanel.hidden; } }, "Import files"),
-        practiceButtons(),
-        h("button", { onclick: () => this.analyzeAll() }, "Analyse all new scans")),
+        h("button", { class: "primary", onclick: () => { this.importPanel.hidden = !this.importPanel.hidden; } }, "Import scan files"),
+        h("button", { onclick: () => this.analyzeAll(), title: "Let the models read every scan that has not been analysed yet" }, "Analyse all new scans"),
+        h("span", { class: "spacer" }),
+        practiceButtons()),
       this.importPanel, this.filterBar, this.table);
   },
   buildImport() {
@@ -986,7 +1012,7 @@ pages.scans = {
     const panel = h("div", { class: "panel stack", style: "margin-bottom:14px" },
       h("h2", { style: "margin:0" }, "Import scans"),
       h("p", { class: "small muted", style: "margin:0" },
-        "ChargeCell request files (.json in the chargecell/1 format) carry their own gate names and voltages. For other files, say which gates were swept. Matrix CSV: first row = x voltages, first column = y voltages. Or three columns x, y, signal."),
+        "Files your measurement software wrote in ChargeCell's format (.json) already say which gates were swept. For other files (.npz, .csv, .txt, .dat), fill in the gates below. A CSV table: first row = voltages of the horizontal gate, first column = voltages of the vertical gate. Or three columns: x voltage, y voltage, signal."),
       files,
       h("div", { class: "fields" },
         field("X gate (horizontal)", h("input", { placeholder: "e.g. P1" }), "x_gate"),
@@ -994,10 +1020,10 @@ pages.scans = {
         field("Device", h("input", { value: "default" }), "device"),
         field("Cooldown", h("input", { placeholder: "e.g. CD7" }), "cooldown"),
         field("Voltages in file", h("select", {}, h("option", { value: "V" }, "volts"), h("option", { value: "mV" }, "millivolts")), "axis_units"),
-        field("Scan kind", h("select", { title: "PvT: the plunger on one axis and its reservoir tunnel gate on the other. Tie bar: a plunger-plunger zoom on the (1,1)-(2,0) transition." },
-          h("option", { value: "" }, "from file (else plunger vs plunger)"), ...Object.entries(KIND_LABEL).map(([k, t]) => h("option", { value: k }, t))), "kind"),
+        field("Scan kind", h("select", { title: "Plunger vs tunnel gate: a plunger on one axis and the tunnel gate to its reservoir on the other. Tie bar: a plunger vs plunger zoom on the (1,1)-(2,0) line." },
+          h("option", { value: "" }, "as in the file (else plunger vs plunger)"), ...Object.entries(KIND_LABEL).map(([k, t]) => h("option", { value: k }, t))), "kind"),
         field("Notes", h("input", {}), "notes")),
-      h("p", { class: "small muted", style: "margin:0" }, "Always fill in the cooldown: training keeps each device and cooldown on one side of the train/test split so the scores stay honest."),
+      h("p", { class: "small muted", style: "margin:0" }, "Please fill in the cooldown. When a model is tested, scans from one cooldown are kept together (all for training or all for testing), so the test results stay honest."),
       h("div", { class: "row" }, h("button", { class: "primary", onclick: async e => {
         if (!files.files.length) { toast("Choose one or more files first.", "error"); return; }
         const fd = new FormData();
@@ -1015,7 +1041,8 @@ pages.scans = {
       } }, "Import")), result);
     return panel;
   },
-  async enter() {
+  async enter(arg) {
+    if (arg === "import") this.importPanel.hidden = false;
     await loadScanList();
     const devices = [...new Set(S.scans.map(s => s.device))];
     const sel = (key, opts, label) => h("label", { class: "row", style: "gap:6px" }, label, h("select", {
@@ -1024,8 +1051,8 @@ pages.scans = {
     this.filterBar.replaceChildren(
       sel("device", [["", "All devices"], ...devices.map(d => [d, d])], "Device"),
       sel("labelled", [["", "All"], ["yes", "Labelled"], ["no", "Not labelled"]], "Label"),
-      sel("source", [["", "All sources"], ["api", "Sent by API"], ["file", "Other files"], ["virtual_device", "Practice devices"]], "Source"),
-      sel("kind", [["", "All kinds"], ...Object.keys(KIND_LABEL).map(k => [k, k])], "Kind"),
+      sel("source", [["", "Anywhere"], ["api", "Measurement software"], ["file", "Imported files"], ["virtual_device", "Practice devices"]], "From"),
+      sel("kind", [["", "All kinds"], ...Object.keys(KINDS).map(k => [k, kindShort(k)])], "Kind"),
       h("span", { class: "muted small" }, `${S.scans.length} scans`));
     this.renderTable();
   },
@@ -1036,27 +1063,27 @@ pages.scans = {
       (!f.labelled || (f.labelled === "yes") === !!(s.label && s.label.status)));
     if (!S.scans.length) {
       this.table.replaceChildren(h("div", { class: "empty" }, h("h2", {}, "No scans yet"),
-        h("p", {}, "Import files above, or start a practice device to try the workflow on a simulated triple dot.")));
+        h("p", {}, "Import scan files (button above), let your measurement software send them, or start a practice device: a simulated device you can scan as often as you like.")));
       return;
     }
     this.table.replaceChildren(h("table", { class: "list" },
-      h("thead", {}, h("tr", {}, ["Measured", "Gates", "Kind", "Device", "Source", "Label", "Model says", ""].map(t => h("th", {}, t)))),
+      h("thead", {}, h("tr", {}, ["Measured", "Gates", "Kind", "Device", "From", "Your label", "ChargeCell says", ""].map(t => h("th", {}, t)))),
       h("tbody", {}, rows.map(s => {
         const a = s.analysis, l = s.label;
         return h("tr", { class: "click", onclick: e => { if (e.target.tagName !== "BUTTON") go("review", s.id); } },
           h("td", {}, when(s.created), h("div", { class: "id" }, shortId(s.id))),
           h("td", {}, `${s.x_gate} / ${s.y_gate}`, h("div", { class: "id" }, `${(s.shape || [])[1]} x ${(s.shape || [])[0]}`)),
-          h("td", {}, s.kind || "PvP"),
+          h("td", {}, kindShort(s.kind)),
           h("td", {}, s.device, s.cooldown ? h("div", { class: "id" }, s.cooldown) : null),
-          h("td", {}, { api: "API", file: "file", virtual_device: "practice", synthetic: "synthetic" }[s.source] || s.source),
+          h("td", {}, SCAN_SOURCE[s.source] || s.source),
           h("td", {}, l && l.status ? h("span", { class: `pill ${l.status}` }, SHORT_STATUS[l.status]) : h("span", { class: "muted" }, "none"),
             l && l.annotator ? h("div", { class: "id" }, l.annotator) : null),
           h("td", {}, a ? [h("span", { class: `pill ${a.status}` }, SHORT_STATUS[a.status]), " ", h("span", { class: "muted small" }, pct(a.confidence || 0)),
-            a.needs_review ? h("div", {}, h("span", { class: "flag review" }, "Needs review")) : null] : h("span", { class: "muted" }, "not analysed")),
+            a.needs_review ? h("div", {}, h("span", { class: "flag review" }, "Please check")) : null] : h("span", { class: "muted" }, "not analysed")),
           h("td", {}, h("div", { class: "row", style: "flex-wrap:nowrap" },
-            (s.kind || "PvP") === "PvP" ? h("button", { onclick: () => go("label", s.id) }, "Label") : null,
+            h("button", { onclick: () => go("label", s.id) }, "Label"),
             h("button", { class: "danger", onclick: async () => {
-              if (!confirm("Delete this scan, its label and analysis?")) return;
+              if (!confirm("Delete this scan, its label and its analysis? This cannot be undone.")) return;
               await api(`/api/scans/${encodeURIComponent(s.id)}`, { method: "DELETE" });
               this.enter();
             } }, "Delete"))));
@@ -1064,7 +1091,7 @@ pages.scans = {
   },
   async analyzeAll() {
     await api("/api/analyze_all?only_new=true", { method: "POST" });
-    toast("Analysing new scans in the background");
+    toast("Analysing new scans in the background. Progress shows at the bottom left.");
     pollStatus();
   },
 };
@@ -1074,7 +1101,7 @@ const GRADE = {
   pass: ["✓", "OK"], warn: ["!", "Check"], fail: ["✗", "Failed"],
   info: ["·", "Action"], open: ["…", "In progress"],
 };
-const SOURCE_LABEL = { backend: "measurement code", gui: "GUI", cli: "command line", practice: "practice device" };
+const SOURCE_LABEL = { backend: "measurement software", gui: "this web page", cli: "command line", practice: "practice device" };
 const gradeMark = g => h("span", { class: `grade ${g}`, title: (GRADE[g] || ["", g])[1], "aria-label": (GRADE[g] || ["", g])[1] }, (GRADE[g] || ["?"])[0]);
 
 pages.runs = {
@@ -1086,9 +1113,9 @@ pages.runs = {
     this.tree = h("div", { class: "panel run-tree" });
     this.stats = h("div", { class: "panel" });
     root.append(
-      h("header", {}, h("h1", {}, "Runs"), this.filterBar),
+      h("header", {}, h("h1", {}, "History"), this.filterBar),
       h("p", { class: "muted small", style: "max-width:900px" },
-        "Every scan ChargeCell analyses is recorded in a run: what was measured, what ChargeCell concluded, what it advised, whether the next scan followed the advice, and what the operator reported doing. Each step is graded when it happens: ",
+        "Every scan ChargeCell analyses is recorded here. A run is one tune-up session on one device (a new run starts after 4 hours without scans). Each run lists what was measured, what ChargeCell concluded and advised, whether the next scan followed that advice, and any notes. Each step is marked when it happens: ",
         gradeMark("pass"), " OK, ", gradeMark("warn"), " a person should check, ", gradeMark("fail"), " failed, ", gradeMark("open"), " in progress."),
       h("div", { class: "runs-layout" }, this.list, this.tree),
       h("div", { style: "margin-top:16px" }, this.stats));
@@ -1106,7 +1133,7 @@ pages.runs = {
       opts.map(([v, t]) => h("option", { value: v, selected: this.filters[key] === v }, t))));
     this.filterBar.replaceChildren(
       sel("device", [["", "All devices"], ...devices.map(d => [d, d])], "Device"),
-      sel("source", [["", "All"], ...Object.entries(SOURCE_LABEL)], "Recorded from"),
+      sel("source", [["", "Anywhere"], ...Object.entries(SOURCE_LABEL)], "Recorded from"),
       h("button", { onclick: () => this.enter(this.id) }, "Refresh"));
     this.id = id && rows.find(r => r.id === id) ? id : (rows[0] || {}).id;
     this.renderList();
@@ -1117,15 +1144,15 @@ pages.runs = {
   renderList() {
     if (!this.rows.length) {
       this.list.replaceChildren(h("div", { class: "empty" }, h("h2", {}, "No runs yet"),
-        h("p", {}, "Runs appear as soon as scans are analysed: from your measurement code, from the Review page, or from a practice device.")));
+        h("p", {}, "A run appears as soon as a scan is analysed: sent by your measurement software, analysed on the Review page, or measured on a practice device.")));
       return;
     }
     this.list.replaceChildren(h("table", { class: "list" },
-      h("thead", {}, h("tr", {}, ["", "Run", "Stages"].map(t => h("th", {}, t)))),
+      h("thead", {}, h("tr", {}, ["", "Run", "Goals"].map(t => h("th", {}, t)))),
       h("tbody", {}, this.rows.map(r => h("tr", { class: `click${r.id === this.id ? " current" : ""}`, onclick: () => go("runs", r.id) },
         h("td", {}, gradeMark(r.grade)),
         h("td", {}, h("div", {}, r.title), h("div", { class: "id" }, `${r.device} · ${when(r.created)} · ${r.n_scans} scan${r.n_scans === 1 ? "" : "s"} · ${SOURCE_LABEL[r.source] || r.source}`)),
-        h("td", {}, h("div", { class: "stage-chips" }, r.stages.map(st => h("span", { class: `chip ${st.grade}`, title: st.title }, gradeMark(st.grade), " ", st.kind)))))))));
+        h("td", {}, h("div", { class: "stage-chips" }, r.stages.map(st => h("span", { class: `chip ${st.grade}`, title: st.title }, gradeMark(st.grade), " ", kindShort(st.kind))))))))));
   },
 
   async renderTree() {
@@ -1140,12 +1167,12 @@ pages.runs = {
         if (d.followed === "yes") extra.push(h("div", { class: "muted small" }, "Followed the last advice."));
         extra.push(h("button", { class: "small-btn", onclick: () => go("review", d.scan_id) }, "Open scan"));
       }
-      if (n.type === "analysis" && d.checks && d.checks.length) extra.push(h("div", { class: "muted small" }, "Held back from FOUND: " + d.checks.join("; ") + "."));
+      if (n.type === "analysis" && d.checks && d.checks.length) extra.push(h("div", { class: "muted small" }, "Not called found because " + d.checks.join("; ") + "."));
       if (n.type === "advice" && d.window) {
         const w = d.window;
         extra.push(h("div", { class: "muted small" }, `${w.x_gate} ${V4(w.x[0])} to ${V4(w.x[1])} V, ${w.y_gate} ${V4(w.y[0])} to ${V4(w.y[1])} V (${w.x[2]} x ${w.y[2]} points)`));
       }
-      const title = n.type === "analysis" ? `${SHORT_STATUS[d.status] || d.status}${d.reason && d.reason !== "none" ? ": " + (REASON_LABEL[d.reason] || d.reason) : ""}` : n.title;
+      const title = n.type === "analysis" ? `${SHORT_STATUS[d.status] || d.status}${d.reason && d.reason !== "none" ? ": " + reasonLabel(d.kind, d.reason) : ""}` : n.title;
       return h("div", { class: `tnode t-${n.type}`, style: `padding-left:${(n.depth - 1) * 20 + 4}px` },
         gradeMark(n.grade),
         h("div", { class: "tbody" },
@@ -1175,14 +1202,14 @@ pages.runs = {
     const kinds = Object.entries(st.per_kind || {});
     const frac = (a, b) => b ? `${a} of ${b} (${pct(a / b)})` : "–";
     const list = (items, empty) => items.length ? h("ul", { class: "steps small" }, items.slice(0, 6).map(f =>
-      h("li", {}, `${f.kind} · ${SHORT_STATUS[f.status] || f.status}: ${REASON_LABEL[f.reason] || f.reason} — ${f.count}`))) : h("p", { class: "muted small" }, empty);
+      h("li", {}, `${kindShort(f.kind)} · ${SHORT_STATUS[f.status] || f.status}: ${reasonLabel(f.kind, f.reason)} — ${f.count}`))) : h("p", { class: "muted small" }, empty);
     const adv = st.advice_followed || { yes: 0, no: 0 }, rv = st.reviews || { agree: 0, disagree: 0 };
     this.stats.replaceChildren(
       h("h2", {}, `Across ${st.runs} run${st.runs === 1 ? "" : "s"}`),
       kinds.length ? h("div", { class: "table-wrap" }, h("table", { class: "list" },
-        h("thead", {}, h("tr", {}, ["Scan kind", "Goals reached", "Median scans to goal", "90% within", "Stalled", "Left unfinished", "In progress", "Wrong “found” (practice)"].map(t => h("th", {}, t)))),
+        h("thead", {}, h("tr", {}, ["Scan kind", "Goal reached", "Scans needed (typical)", "Scans needed (9 in 10 runs)", "Got stuck", "Left unfinished", "In progress", "Wrong “found” (practice)"].map(t => h("th", {}, t)))),
         h("tbody", {}, kinds.map(([k, v]) => h("tr", {},
-          h("td", {}, KIND_LABEL[k] || k),
+          h("td", {}, kindShort(k)),
           h("td", {}, frac(v.reached, v.stages - v.open)),
           h("td", {}, v.median_scans ?? "–"), h("td", {}, v.p90_scans ?? "–"),
           h("td", {}, v.stalled), h("td", {}, v.left), h("td", {}, v.open),
@@ -1196,71 +1223,79 @@ pages.runs = {
   },
 };
 
-// ---------------------------------------------------------------- Synthetic page
+// ---------------------------------------------------------------- Simulated scans page
+const SIZE_HINT = { PvP: 96, PvT: 64, tiebar: 64 };
 pages.synthetic = {
   build() {
     const root = $("#page-synthetic");
     const f = this.f = {
       name: h("input", { value: "sim-" + new Date().toISOString().slice(0, 10) }),
-      kind: h("select", {}, Object.entries(KIND_LABEL).map(([k, t]) => h("option", { value: k }, t))),
+      kind: h("select", { onchange: () => { f.size.value = SIZE_HINT[f.kind.value]; } }, Object.entries(KIND_LABEL).map(([k, t]) => h("option", { value: k }, t))),
       n: h("input", { type: "number", min: 50, step: 50, value: 3000 }),
-      size: h("select", {}, [64, 96, 128].map(v => h("option", { value: v, selected: v === 96 }, `${v} x ${v}`))),
-      preset: h("select", {}, h("option", { value: "mixed" }, "Mixed linear and triangular"),
-        h("option", { value: "hrl_linear" }, "Linear triple dot"), h("option", { value: "hrl_triangle" }, "Triangular triple dot")),
+      size: h("select", {}, [64, 96, 128].map(v => h("option", { value: v, selected: v === 96 }, `${v} x ${v} pixels`))),
+      preset: h("select", {}, h("option", { value: "mixed" }, "Both (linear and triangular)"),
+        h("option", { value: "hrl_linear" }, "Three dots in a line"), h("option", { value: "hrl_triangle" }, "Three dots in a triangle")),
       found: h("input", { type: "number", min: 0, max: 100, value: 40 }),
       notin: h("input", { type: "number", min: 0, max: 100, value: 35 }),
       bad: h("input", { type: "number", min: 0, max: 100, value: 25 }),
       workers: h("input", { type: "number", min: 1, max: 64, value: Math.max(1, (navigator.hardwareConcurrency || 2) - 1) }),
       seed: h("input", { type: "number", value: Math.floor(Math.random() * 1e6) }),
     };
-    const L = (t, el) => h("label", {}, t, el);
+    const L = (t, el, help) => h("label", {}, t, el, help ? h("span", { class: "hint" }, help) : null);
     this.list = h("div", { class: "stack" });
     this.preview = h("div", {});
-    root.append(h("header", {}, h("h1", {}, "Synthetic data")),
+    root.append(h("header", {}, h("h1", {}, "Simulated scans")),
+      h("p", { class: "muted small", style: "max-width:900px" },
+        "Models learn from simulated scans, where the right answer is known exactly. Make a set of simulated scans here, then train a model on it on the Train page. The simulation covers three dots with a charge sensor that can drift, noise, charges that jump, and (for plunger vs tunnel gate scans) electrons that tunnel too slowly or too fast."),
       h("div", { class: "two-col" },
         h("div", { class: "panel stack" },
-          h("h2", { style: "margin:0" }, "Generate a dataset"),
-          h("p", { class: "small muted", style: "margin:0" },
-            "Simulated triple-dot scans with exact labels: constant-interaction model with tunnel coupling, a charge sensor that can drift off its flank, 1/f and telegraph noise, charge jumps and latching; for plunger-vs-tunnel-gate scans also the reservoir tunnel rate (slow: lines latch and vanish; fast: lines smear). The outcome mix controls how often each case is aimed for; final labels come from the physics."),
-          h("div", { class: "fields" }, L("Name", f.name), h("label", { class: "wide" }, "Scan kind", f.kind), L("Number of scans", f.n), L("Image size", f.size), h("label", { class: "wide" }, "Device style", f.preset)),
-          h("div", { class: "fields" }, L("Aim: found (%)", f.found), L("Aim: not in window (%)", f.notin), L("Aim: uninterpretable (%)", f.bad)),
-          h("div", { class: "fields" }, L("Worker processes", f.workers), L("Random seed", f.seed)),
-          h("p", { class: "small muted", style: "margin:0" }, "Image size must match the model you train. Roughly 15 scans per second per worker."),
-          h("div", { class: "row" }, h("button", { class: "primary", onclick: () => this.generate() }, "Generate"))),
-        h("div", { class: "stack" }, h("h2", { style: "margin:4px 0 0" }, "Datasets"), this.list)),
+          h("h2", { style: "margin:0" }, "Make a set of simulated scans"),
+          h("div", { class: "fields" }, L("Name", f.name), h("label", { class: "wide" }, "Scan kind", f.kind),
+            L("Number of scans", f.n, "3000 or more for a useful model"),
+            L("Image size", f.size, "Must match the model: 96 for plunger vs plunger, 64 for the others"),
+            h("label", { class: "wide" }, "Device layout", f.preset)),
+          h("details", {}, h("summary", {}, "More settings"),
+            h("p", { class: "small muted", style: "margin:8px 0" }, "What share of the scans should show each outcome (the simulation decides the final answer for each scan):"),
+            h("div", { class: "fields" }, L("Goal in view (%)", f.found), L("Goal not in view (%)", f.notin), L("Can't be read (%)", f.bad)),
+            h("div", { class: "fields", style: "margin-top:8px" },
+              L("Processor cores to use", f.workers), L("Random seed", f.seed, "The same seed makes the same scans"))),
+          h("p", { class: "small muted", style: "margin:0" }, "Roughly 15 scans per second per processor core."),
+          h("div", { class: "row" }, h("button", { class: "primary", onclick: () => this.generate() }, "Make scans"))),
+        h("div", { class: "stack" }, h("h2", { style: "margin:4px 0 0" }, "Sets of simulated scans"), this.list)),
       h("div", { style: "margin-top:18px" }, this.preview));
   },
   async enter() { this.refresh(); },
   async refresh() {
     const ds = await api("/api/synthetic");
-    if (!ds.length) { this.list.replaceChildren(h("p", { class: "muted" }, "No datasets yet. Generate one to train your first model.")); return; }
+    if (!ds.length) { this.list.replaceChildren(h("p", { class: "muted" }, "None yet. Make a set to train your first model.")); return; }
     this.list.replaceChildren(...ds.map(d => {
       const c = d.counts || {}, tot = Object.values(c).reduce((a, b) => a + b, 0) || 1;
       const by = st => Object.entries(c).filter(([k]) => k.startsWith(st)).reduce((a, [, v]) => a + v, 0);
       return h("div", { class: "panel small" },
-        h("div", { class: "row" }, h("b", {}, d.name), h("span", { class: "muted" }, `${d.kind || "PvP"}, ${d.n} scans, ${d.size}px, ${d.preset}`), h("span", { class: "spacer" }),
-          h("button", { onclick: () => this.showPreview(d.name) }, "Preview"),
-          h("button", { class: "danger", onclick: async () => { if (confirm(`Delete dataset ${d.name}?`)) { await api(`/api/synthetic/${d.name}`, { method: "DELETE" }); this.refresh(); } } }, "Delete")),
-        h("div", { class: "countbar", title: "found / not in window / uninterpretable" },
+        h("div", { class: "row" }, h("b", {}, d.name), h("span", { class: "muted" }, `${kindShort(d.kind)} · ${d.n} scans · ${d.size} x ${d.size} pixels`), h("span", { class: "spacer" }),
+          h("button", { onclick: () => this.showPreview(d.name) }, "Look at some"),
+          h("a", { class: "button", href: `#/train/${d.kind || "PvP"}` }, "Train on it"),
+          h("button", { class: "danger", onclick: async () => { if (confirm(`Delete the set ${d.name}? This cannot be undone.`)) { await api(`/api/synthetic/${d.name}`, { method: "DELETE" }); this.refresh(); } } }, "Delete")),
+        h("div", { class: "countbar", title: "goal in view / not in view / can't be read" },
           h("i", { style: `width:${by("FOUND") / tot * 100}%;background:var(--found)` }),
           h("i", { style: `width:${by("NOT_IN") / tot * 100}%;background:var(--move)` }),
           h("i", { style: `width:${by("UNINT") / tot * 100}%;background:var(--fail)` })),
-        h("div", { class: "muted" }, `Found ${by("FOUND")}, not in window ${by("NOT_IN")}, uninterpretable ${by("UNINT")}. Created ${when(d.created)}.`));
+        h("div", { class: "muted" }, `Goal in view ${by("FOUND")}, not in view ${by("NOT_IN")}, can't be read ${by("UNINT")}. Made ${when(d.created)}.`));
     }));
   },
   async generate() {
     const f = this.f, tot = +f.found.value + +f.notin.value + +f.bad.value;
-    if (tot <= 0) { toast("The outcome mix must add up to more than 0.", "error"); return; }
+    if (tot <= 0) { toast("The three shares must add up to more than 0.", "error"); return; }
     await api("/api/synthetic", { method: "POST", json: {
       name: f.name.value, kind: f.kind.value, n: +f.n.value, size: +f.size.value, preset: f.preset.value, seed: +f.seed.value,
       workers: +f.workers.value, mix: [f.found.value / tot, f.notin.value / tot, f.bad.value / tot] } });
-    toast("Generating in the background. Progress shows in the sidebar.");
+    toast("Making scans in the background. Progress shows at the bottom left.");
     f.seed.value = Math.floor(Math.random() * 1e6);
     pollStatus();
   },
   async showPreview(name) {
     const items = await api(`/api/synthetic/${name}/preview?n=18`);
-    this.preview.replaceChildren(h("h2", {}, `Preview: ${name}`), h("div", { class: "thumbs" }, items.map(it => {
+    this.preview.replaceChildren(h("h2", {}, `Some scans from ${name}`), h("div", { class: "thumbs" }, items.map(it => {
       const c = h("canvas", { width: it.size, height: it.size });
       const v = decodeF32(it.signal), ctx = c.getContext("2d"), img = ctx.createImageData(it.size, it.size);
       const s = Array.from(v).sort((a, b) => a - b), lo = s[Math.floor(s.length * 0.01)], hi = s[Math.floor(s.length * 0.99)];
@@ -1271,126 +1306,471 @@ pages.synthetic = {
       ctx.putImageData(img, 0, 0);
       const m = it.meta;
       return h("div", { class: "thumb" }, c, h("div", { class: "cap" }, h("span", { class: `pill ${m.status}` }, SHORT_STATUS[m.status]),
-        h("div", { class: "muted" }, REASON_LABEL[m.reason] || m.reason), h("div", { class: "muted" }, `${m.pair ? "dots " + m.pair.join("-") : "dot " + ((m.dot ?? 0) + 1)}, ${m.artifact}`)));
+        h("div", { class: "muted" }, reasonLabel(m.kind, m.reason)), h("div", { class: "muted" }, `${m.pair ? "dots " + m.pair.join("-") : "dot " + ((m.dot ?? 0) + 1)}${m.artifact && m.artifact !== "normal" ? ", problem added: " + reasonLabel(m.kind, m.artifact).toLowerCase() : ""}`)));
     })));
   },
 };
 
+// ---------------------------------------------------------------- small shared pieces
+/* A command to copy: shown in a dark box with a Copy button. */
+function cmdBox(text) {
+  return h("div", { class: "cmd-row" }, h("pre", { class: "cmd" }, text),
+    h("button", { onclick: () => navigator.clipboard.writeText(text).then(() => toast("Copied")) }, "Copy"));
+}
+/* One line on how good a model is, from its test results. */
+function qualityLine(m) {
+  const q = m.quality || {};
+  if (q.precision == null) return "No test results stored with this model.";
+  return `Right ${pct(q.precision)} of the time when it said "found"; recognised ${pct(q.recall || 0)} of the scans that showed the ${KINDS[m.kind || "PvP"].noun}` +
+    ` (tested on ${q.n} ${q.source === "real" ? "of your labelled" : "simulated"} scans).`;
+}
+function trainedLine(m) {
+  const t = m.trained_on, a = m.added;
+  const bits = [];
+  if (t) bits.push(`Trained on ${t.computer} (${t.device})${t.minutes != null ? ` in ${t.minutes < 90 ? Math.round(t.minutes) + " min" : (t.minutes / 60).toFixed(1) + " h"}` : ""}`);
+  if (a && a.source) bits.push(`added from ${a.source}`);
+  bits.push(`made ${when(m.created)}`);
+  const s = bits.join(", ");
+  return s.charAt(0).toUpperCase() + s.slice(1) + ".";
+}
+async function useModel(m) {
+  const r = await api(`/api/models/${encodeURIComponent(m.id)}/activate`, { method: "POST" });
+  toast(`${kindShort(r.kind)} scans are now read by "${r.name}".`);
+  await loadModels();
+  pollStatus();
+  return r;
+}
+async function reanalyse(kind) {
+  await api(`/api/analyze_all?only_new=false&kind=${encodeURIComponent(kind)}`, { method: "POST" });
+  toast(`Analysing all ${kindShort(kind).toLowerCase()} scans again in the background. Progress shows at the bottom left.`);
+  pollStatus();
+}
+
+// ---------------------------------------------------------------- Home page
+pages.home = {
+  build() {
+    this.body = h("div", { class: "stack", style: "gap:18px" });
+    $("#page-home").append(h("header", {}, h("h1", {}, "ChargeCell")), this.body);
+  },
+  async enter() {
+    const [st, , , devices] = await Promise.all([api("/api/status"), loadModels(), loadScanList(), api("/api/devices")]);
+    const task = (href, title, text, onclick) => h(onclick ? "button" : "a", { class: "card", href: onclick ? null : href, onclick },
+      h("b", {}, title), h("span", {}, text));
+    const kinds = Object.keys(KINDS);
+    const missing = kinds.filter(k => !inUse(k));
+    const nByKind = k => S.scans.filter(s => (s.kind || "PvP") === k).length;
+    const devicesSet = devices.some(d => Object.keys(d.safe_limits || {}).length);
+    const steps = [
+      [missing.length < kinds.length, "Get a model",
+        missing.length === kinds.length ? "No model is in use yet. Add a model file you were given, or train one."
+          : missing.length ? `There is no model yet for ${missing.map(k => kindShort(k).toLowerCase()).join(" or ")} scans.` : "Every kind of scan has a model.",
+        [h("a", { class: "button", href: "#/models" }, "Add a model file"), h("a", { class: "button", href: "#/train" }, "Train one")]],
+      [st.n_scans > 0, "Get some scans",
+        "Import scan files, let your measurement software send them, or try a practice device (a simulated device).",
+        [h("a", { class: "button", href: "#/scans/import" }, "Import scans"), practiceButtons()]],
+      [devicesSet, "Enter your device's gates and safe voltage limits",
+        "Optional, but suggested scans then always stay inside your limits.",
+        [h("a", { class: "button", href: "#/device" }, "Device settings")]],
+      [st.n_labelled > 0, "Label a few of your own scans",
+        "Where ChargeCell is wrong, correct it. Your labels are used to test and train the next model.",
+        [h("a", { class: "button", href: "#/label" }, "Label scans")]],
+    ];
+    const allDone = steps.every(s => s[0]);
+    const checklist = h(allDone ? "details" : "div", { class: "panel" },
+      h(allDone ? "summary" : "h2", {}, allDone ? "Getting started (all done)" : "Getting started"),
+      h("ol", { class: "checklist" }, steps.map(([done, title, text, actions]) => h("li", { class: done ? "done" : "" },
+        h("span", { class: `tick${done ? " done" : ""}`, "aria-label": done ? "done" : "to do" }, done ? "✓" : ""),
+        h("div", {}, h("b", {}, title), h("div", { class: "small muted" }, text),
+          done ? null : h("div", { class: "row", style: "margin-top:6px" }, actions))))));
+    const models = h("div", { class: "panel" },
+      h("div", { class: "row" }, h("h2", { style: "margin:0" }, "Models in use"), h("span", { class: "spacer" }),
+        h("a", { class: "button", href: "#/models" }, "Switch models")),
+      h("table", { class: "list plain", style: "margin-top:8px" }, h("tbody", {}, kinds.map(k => {
+        const m = inUse(k);
+        return h("tr", {},
+          h("td", {}, h("b", {}, KINDS[k].short), h("div", { class: "small muted" }, KINDS[k].goal)),
+          h("td", {}, m ? [h("div", {}, m.display_name), h("div", { class: "small muted" }, qualityLine(m))]
+            : h("span", { class: "muted" }, "No model yet")),
+          h("td", { class: "small muted" }, `${nByKind(k)} scan${nByKind(k) === 1 ? "" : "s"}`));
+      }))));
+    const jobs = (st.running_jobs || []);
+    this.body.replaceChildren(...[
+      h("p", { class: "lead" }, "ChargeCell reads charge-stability scans of your quantum-dot device, tells you what each scan shows, and suggests where to scan next. It only gives advice: it never changes a gate voltage."),
+      h("div", { class: "cards" },
+        task("#/review", "Look at a scan", S.scans.length ? `See what ChargeCell reads in your latest scan and where to scan next. ${S.scans.length} scan${S.scans.length === 1 ? "" : "s"} so far.` : "No scans yet: import some or try a practice device."),
+        task("#/scans/import", "Import scans", "Add scan files from your measurement computer."),
+        task(null, "Try a practice device", "A simulated device: scan it, read the scan, follow the advice. Nothing real is touched.", () => startPractice("PvP")),
+        task("#/label", "Label scans", "Correct ChargeCell where it is wrong. Your labels train the next model."),
+        task("#/models", "Switch models", "See how good each model is and choose which one reads your scans."),
+        task("#/train", "Train a model", "On this computer, or on another computer with a GPU.")),
+      jobs.length ? h("div", { class: "panel" }, h("h2", {}, "Running now"),
+        jobs.map(j => h("div", { class: "small", style: "margin-bottom:6px" }, h("b", {}, j.title), ": ", jobText(j),
+          j.kind === "train" ? [" · ", h("a", { href: "#/train" }, "Details")] : null))) : null,
+      allDone ? models : h("div", { class: "two-col" }, checklist, models),
+      allDone ? checklist : null,
+      h("p", { class: "small muted" }, "New to the words used here? The README has a glossary. Your measurement software can talk to ChargeCell directly: see PROTOCOL.md.")].filter(Boolean));
+  },
+};
+
+// ---------------------------------------------------------------- Models page
+pages.models = {
+  build() {
+    const root = $("#page-models");
+    this.addPanel = this.buildAdd();
+    this.addPanel.hidden = true;
+    this.body = h("div", { class: "stack", style: "gap:18px" });
+    this.banners = {};
+    root.append(
+      h("header", {}, h("h1", {}, "Models"),
+        h("button", { class: "primary", onclick: () => { this.addPanel.hidden = !this.addPanel.hidden; } }, "Add a model file"),
+        h("a", { class: "button", href: "#/train" }, "Train a new model")),
+      h("p", { class: "muted small", style: "max-width:900px" },
+        "Each kind of scan has its own model, and one model per kind is in use: it reads every new scan of that kind. Switching takes effect at once. Scans that were already analysed keep their result until you analyse them again. To use a model on another computer, download it here and add the file there."),
+      this.addPanel, this.body);
+  },
+  buildAdd() {
+    const zip = h("input", { type: "file", accept: ".zip" });
+    const folder = h("input", { type: "file", webkitdirectory: true, multiple: true });
+    const name = h("input", { placeholder: "keep the model's own name" });
+    const use = h("input", { type: "checkbox", checked: true });
+    const add = async e => {
+      const files = zip.files.length ? [...zip.files]
+        : [...folder.files].filter(f => f.name === "model.json" || /^member_\d+\.pt$/.test(f.name));
+      if (!files.length) { toast("Choose a model file (.zip) or a model folder first.", "error"); return; }
+      const fd = new FormData();
+      files.forEach(f => fd.append("files", f, f.name));
+      fd.append("use", use.checked ? "true" : "false");
+      fd.append("name", name.value.trim());
+      e.target.disabled = true;
+      try {
+        const m = await api("/api/models/add", { method: "POST", body: fd });
+        toast(`Added "${m.display_name}" for ${kindShort(m.kind).toLowerCase()} scans${m.in_use ? ". It is now in use" : ""}.`);
+        zip.value = ""; folder.value = ""; name.value = "";
+        this.addPanel.hidden = true;
+        if (m.in_use) await this.afterSwitch(m.kind);
+        pollStatus();
+        this.enter();
+      } finally { e.target.disabled = false; }
+    };
+    return h("div", { class: "panel stack" },
+      h("h2", { style: "margin:0" }, "Add a model"),
+      h("p", { class: "small muted", style: "margin:0" },
+        "A model file is a .zip that ChargeCell makes when you download a model, or when a model is trained on another computer. You can also choose a model folder: the folder with model.json and member_0.pt inside."),
+      h("div", { class: "fields" },
+        h("label", { class: "wide" }, "Model file (.zip)", zip),
+        h("label", { class: "wide" }, "or a model folder", folder),
+        h("label", { class: "wide" }, "Name (optional)", name)),
+      h("label", { class: "check" }, use, "Use it now for its kind of scans"),
+      h("div", { class: "row" }, h("button", { class: "primary", onclick: add }, "Add model")));
+  },
+  async enter() {
+    const ms = await loadModels();
+    this.body.replaceChildren(...Object.keys(KINDS).map(k => this.kindPanel(k, ms.filter(m => (m.kind || "PvP") === k))));
+  },
+  async afterSwitch(kind) {
+    await loadScanList();
+    const cur = inUse(kind);
+    const n = S.scans.filter(s => (s.kind || "PvP") === kind && s.analysis && cur && s.analysis.model_id !== cur.id).length;
+    this.banners[kind] = n ? { n, name: cur.display_name } : null;
+  },
+  kindPanel(kind, ms) {
+    const cur = ms.find(m => m.in_use);
+    const others = ms.filter(m => !m.in_use).sort((a, b) => (b.created || "").localeCompare(a.created || ""));
+    const ban = this.banners[kind];
+    return h("div", { class: "panel stack" },
+      h("div", {}, h("h2", { style: "margin:0" }, KINDS[kind].short), h("div", { class: "small muted" }, KINDS[kind].goal)),
+      ban ? h("div", { class: "banner row" },
+        h("span", {}, `${ban.n} ${kindShort(kind).toLowerCase()} scan${ban.n === 1 ? " was" : "s were"} analysed by another model. Analyse ${ban.n === 1 ? "it" : "them"} again with "${ban.name}"?`),
+        h("button", { class: "primary", onclick: async () => { await reanalyse(kind); this.banners[kind] = null; this.enter(); } }, "Analyse again"),
+        h("button", { onclick: () => { this.banners[kind] = null; this.enter(); } }, "Not now")) : null,
+      cur ? this.card(cur, true) : h("div", { class: "empty-inline" },
+        h("p", { style: "margin:0 0 8px" }, "No model in use for these scans yet."),
+        h("div", { class: "row" }, h("button", { onclick: () => { this.addPanel.hidden = false; this.addPanel.scrollIntoView({ behavior: "smooth" }); } }, "Add a model file"),
+          h("a", { class: "button", href: `#/train/${kind}` }, "Train one"))),
+      others.length ? h("div", { class: "stack", style: "gap:8px" },
+        h("h3", { style: "margin:6px 0 0" }, `Other versions (${others.length})`), others.map(m => this.card(m, false))) : null);
+  },
+  card(m, current) {
+    const rename = async () => {
+      const n = prompt("New name for this model", m.display_name);
+      if (n == null || !n.trim()) return;
+      await api(`/api/models/${encodeURIComponent(m.id)}`, { method: "PATCH", json: { name: n.trim() } });
+      toast("Renamed"); await loadModels(); this.enter(); pollStatus();
+    };
+    const del = async () => {
+      if (!confirm(`Delete the model "${m.display_name}"? This cannot be undone. (Download it first if you might want it back.)`)) return;
+      await api(`/api/models/${encodeURIComponent(m.id)}`, { method: "DELETE" });
+      toast("Model deleted"); this.enter();
+    };
+    const use = async e => {
+      e.target.disabled = true;
+      try { await useModel(m); await this.afterSwitch(m.kind || "PvP"); this.enter(); } finally { e.target.disabled = false; }
+    };
+    const notes = (m.config || {}).notes;
+    return h("div", { class: `model-card${current ? " current" : ""}` },
+      h("div", { class: "row" },
+        h("b", { class: "model-name" }, m.display_name),
+        current ? h("span", { class: "flag ok" }, "In use") : null,
+        h("span", { class: "spacer" }),
+        current ? null : h("button", { class: "primary", onclick: use }, "Use this one"),
+        h("button", { onclick: rename }, "Rename"),
+        h("a", { class: "button", href: `/api/models/${encodeURIComponent(m.id)}/download`, title: "A .zip file you can add to ChargeCell on another computer" }, "Download"),
+        current ? null : h("button", { class: "danger", onclick: del }, "Delete")),
+      current ? h("ul", { class: "steps small", style: "margin-top:8px" }, (m.quality.lines || []).map(l => h("li", {}, l)))
+        : h("div", { class: "small", style: "margin-top:4px" }, qualityLine(m)),
+      h("div", { class: "small muted", style: "margin-top:4px" }, trainedLine(m),
+        m.networks ? ` ${m.networks} network${m.networks === 1 ? "" : "s"}, images of ${m.image_size} x ${m.image_size} pixels.` : ""),
+      notes ? h("div", { class: "small", style: "margin-top:4px" }, "Notes: ", notes) : null,
+      m.split_note ? h("p", { class: "warn small" }, m.split_note) : null,
+      this.results(m));
+  },
+  results(m) {
+    const metr = m.metrics || {};
+    const block = (name, x) => x ? h("div", {}, h("h3", {}, name === "real" ? `Your labelled scans kept out of training (${x.n})` : `Simulated scans kept out of training (${x.n})`),
+      h("div", { class: "metric-grid" }, [
+        ["found_precision", "of its “found” answers were right"],
+        ["found_recall", "of scans with the goal in view were recognised"],
+        ["status_accuracy", "of answers (found / not in view / can't read) were right"],
+        ["occupancy_pixel_accuracy", "of pixels had the right electron count"],
+      ].filter(([k]) => x[k] != null).map(([k, t]) => h("div", { class: "metric" }, h("b", {}, pct(x[k])), h("span", {}, t)))),
+      x.confusion && x.confusion_labels ? h("table", { class: "list", style: "margin-top:8px;width:auto" },
+        h("tr", {}, h("th", {}, "True answer ↓ / model said →"), x.confusion_labels.map(l => h("th", {}, SHORT_STATUS[l]))),
+        x.confusion.map((row, i) => h("tr", {}, h("td", {}, SHORT_STATUS[x.confusion_labels[i]]), row.map(v => h("td", {}, v))))) : null) : null;
+    if (!metr.real && !metr.synthetic) return null;
+    return h("details", { style: "margin-top:6px" }, h("summary", {}, "Test results"),
+      block("real", metr.real), block("synthetic", metr.synthetic),
+      h("p", { class: "small muted" }, `It says "found" only when it is at least ${pct(m.found_threshold || 0)} sure.`));
+  },
+};
+
 // ---------------------------------------------------------------- Train page
+const TRAIN_DEFAULTS = { PvP: { epochs: 14, ensemble: 3 }, PvT: { epochs: 12, ensemble: 2 }, tiebar: { epochs: 14, ensemble: 2 } };
+function jobText(j) {
+  const w = j.worker || {};
+  switch (j.state) {
+    case "queued": return "waiting for another job on this computer to finish";
+    case "preparing": return "packing the training data for the other computer";
+    case "waiting": return "waiting for a training computer to pick it up";
+    case "running": return j.where === "remote" ? `training on ${w.computer || "another computer"}: ${j.message}` : j.message;
+    case "done": return j.result && j.result.name ? `finished: "${j.result.name}"` : "finished";
+    case "failed": return `failed: ${j.error || j.message}`;
+    case "cancelled": return "cancelled";
+    case "interrupted": return "stopped: ChargeCell was restarted while this ran";
+    default: return j.message || j.state;
+  }
+}
+const minutesAgo = iso => iso ? Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000)) : null;
+
 pages.train = {
   build() {
     const root = $("#page-train");
+    this.kind = "PvP";
+    this.where = "here";
     const f = this.f = {
-      kind: h("select", { onchange: () => this.renderDatasets() }, Object.entries(KIND_LABEL).map(([k, t]) => h("option", { value: k }, t))),
-      size: h("select", { onchange: () => this.renderDatasets() }, [64, 96, 128].map(v => h("option", { value: v, selected: v === 96 }, `${v} x ${v}`))),
+      name: h("input", {}),
+      use_when_done: h("input", { type: "checkbox" }),
       use_real: h("input", { type: "checkbox", checked: true }),
       only_reviewed: h("input", { type: "checkbox" }),
       real_weight: h("input", { type: "number", min: 1, max: 50, value: 5 }),
-      epochs: h("input", { type: "number", min: 1, max: 200, value: 12 }),
+      epochs: h("input", { type: "number", min: 1, max: 200, value: 14 }),
       ensemble: h("input", { type: "number", min: 1, max: 8, value: 3 }),
-      base: h("select", {}, h("option", { value: 12 }, "Small (fast)"), h("option", { value: 16, selected: true }, "Standard"), h("option", { value: 24 }, "Large")),
+      base: h("select", {}, h("option", { value: 12 }, "Small (faster)"), h("option", { value: 16, selected: true }, "Standard"), h("option", { value: 24 }, "Large (slower)")),
       batch_size: h("input", { type: "number", min: 4, max: 256, value: 32 }),
       lr: h("input", { type: "number", step: 0.0005, value: 0.002 }),
-      target_precision: h("input", { type: "number", min: 0.8, max: 0.999, step: 0.005, value: 0.97 }),
-      notes: h("input", { placeholder: "What changed in this version?" }),
+      target_precision: h("input", { type: "number", min: 80, max: 99.9, step: 0.5, value: 97 }),
+      notes: h("input", { placeholder: "for example: what is different about this one" }),
     };
-    const L = (t, el) => h("label", {}, t, el);
-    this.dsBox = h("div", { class: "stack", style: "gap:4px" });
-    this.progress = h("div", {});
-    this.models = h("div", { class: "stack" });
-    root.append(h("header", {}, h("h1", {}, "Train")),
-      h("div", { class: "two-col" },
-        h("div", { class: "panel stack" },
-          h("h2", { style: "margin:0" }, "Train a new model version"),
-          h("p", { class: "small muted", style: "margin:0" }, "Each scan kind has its own model: plunger vs plunger finds (1,1), plunger vs tunnel gate loads one electron, the tie bar sets up readout."),
-          L("Scan kind", f.kind), L("Image size", f.size),
-          h("div", {}, h("div", { class: "small muted" }, "Synthetic datasets"), this.dsBox),
-          h("label", { class: "check" }, f.use_real, h("span", { id: "real-count" }, "Include labelled real scans")),
-          h("label", { class: "check" }, f.only_reviewed, "Only labels with a second check"),
-          h("div", { class: "fields" }, L("Weight of each real scan", f.real_weight), L("Epochs", f.epochs), L("Ensemble members", f.ensemble), L("Network size", f.base)),
-          h("details", {}, h("summary", {}, "Advanced"), h("div", { class: "fields", style: "margin-top:8px" },
-            L("Batch size", f.batch_size), L("Learning rate", f.lr), L("Target precision for FOUND", f.target_precision))),
-          L("Notes", f.notes),
-          h("p", { class: "small muted", style: "margin:0" }, "The FOUND threshold is calibrated on held-out data so that at least the target fraction of FOUND calls are right; otherwise the model defers. Real scans are split by device and cooldown."),
-          h("div", { class: "row" }, h("button", { class: "primary", onclick: () => this.start() }, "Start training"))),
-        h("div", { class: "stack" }, this.progress)),
-      h("h2", { style: "margin-top:22px" }, "Model versions"), this.models);
+    const L = (t, el, help) => h("label", {}, t, el, help ? h("span", { class: "hint" }, help) : null);
+    const step = (n, title, ...kids) => h("div", { class: "panel stack" }, h("h2", { style: "margin:0" }, h("span", { class: "step-num" }, n), title), ...kids);
+    this.kindBox = h("div", { class: "stack", style: "gap:6px" });
+    this.dataBox = h("div", { class: "stack", style: "gap:6px" });
+    this.whereBox = h("div", { class: "stack", style: "gap:6px" });
+    this.remoteHelp = h("div", { class: "stack", style: "gap:8px" });
+    this.startBtn = h("button", { class: "primary", onclick: e => this.start(e) }, "Start training");
+    this.progress = h("div", { class: "stack" });
+    this.recent = h("div", {});
+    root.append(h("header", {}, h("h1", {}, "Train a model")),
+      h("div", { class: "grid-train" },
+        h("div", { class: "stack" },
+          step(1, "What kind of scans is it for?", this.kindBox),
+          step(2, "What should it learn from?", this.dataBox),
+          step(3, "Where should it train?", this.whereBox, this.remoteHelp),
+          step(4, "Name it and start",
+            h("div", { class: "fields" }, h("label", { class: "wide" }, "Name", f.name)),
+            h("label", { class: "check" }, f.use_when_done, "Use the new model as soon as it is ready"),
+            h("div", { class: "hint" }, "Otherwise switch to it on the Models page after looking at its test results. If no model is in use for this kind of scan yet, the new one is used anyway."),
+            h("details", {}, h("summary", {}, "More settings"),
+              h("div", { class: "fields", style: "margin-top:8px" },
+                L("Passes over the data", f.epochs, "More passes learn more, up to a point, and take longer"),
+                L("Networks to average", f.ensemble, "More networks give steadier answers and take longer"),
+                L("Network size", f.base),
+                L("Weight of a labelled scan", f.real_weight, "How many simulated scans one of your labelled scans counts as"),
+                L("“Found” must be right at least (%)", f.target_precision, "It says found only where it was right this often in testing"),
+                L("Scans per training step", f.batch_size, "Lower it if the GPU runs out of memory"),
+                L("Learning rate", f.lr, "Leave as it is unless training is unstable")),
+              h("label", { class: "check", style: "margin-top:8px" }, f.only_reviewed, "Only use labels checked by a second person"),
+              h("div", { class: "fields", style: "margin-top:8px" }, h("label", { class: "wide" }, "Notes", f.notes))),
+            h("div", { class: "row" }, this.startBtn))),
+        h("div", { class: "stack" }, this.progress, this.recent)));
   },
-  async enter() {
-    this.datasets = await api("/api/synthetic");
-    this.renderDatasets();
-    const st = await api("/api/status");
-    $("#real-count").textContent = `Include labelled real scans (${st.n_labelled} labelled)`;
-    this.refresh();
+
+  async enter(arg) {
+    if (arg && KINDS[arg]) this.setKind(arg, false);
+    const [ds] = await Promise.all([api("/api/synthetic"), loadScanList(), loadModels()]);
+    this.datasets = ds;
+    this.renderKinds(); this.renderData(); this.renderWhere();
     this.watch();
   },
-  renderDatasets() {
-    const size = +this.f.size.value, kind = this.f.kind.value;
-    const ok = (this.datasets || []).filter(d => d.size === size && (d.kind || "PvP") === kind);
-    this.dsBox.replaceChildren(...(ok.length ? ok.map(d => h("label", { class: "check" },
-      h("input", { type: "checkbox", value: d.name, checked: true }), `${d.name} (${d.n} scans)`)) :
-      [h("p", { class: "small muted", style: "margin:0" }, `No ${size}px ${kind} datasets. Generate one on the Synthetic data page, or pick another size.`)]));
+  setKind(k, render = true) {
+    this.kind = k;
+    const d = TRAIN_DEFAULTS[k];
+    this.f.epochs.value = d.epochs; this.f.ensemble.value = d.ensemble;
+    if (render) { this.renderKinds(); this.renderData(); }
   },
-  async start() {
+  renderKinds() {
+    this.kindBox.replaceChildren(...Object.entries(KINDS).map(([k, info]) => {
+      const m = inUse(k);
+      return h("label", { class: `choice${this.kind === k ? " on" : ""}` },
+        h("input", { type: "radio", name: "train-kind", checked: this.kind === k, onchange: () => this.setKind(k) }),
+        h("div", {}, h("b", {}, info.short), h("div", { class: "small muted" }, info.goal,
+          m ? ` In use now: "${m.display_name}".` : " No model in use yet.")));
+    }));
+    this.f.name.placeholder = `${KINDS[this.kind].short} model, ${new Date().toISOString().slice(0, 10)}`;
+  },
+  renderData() {
+    const sets = (this.datasets || []).filter(d => (d.kind || "PvP") === this.kind);
+    const nLab = S.scans.filter(s => (s.kind || "PvP") === this.kind && s.label && s.label.status).length;
+    const size0 = sets.length ? sets[0].size : null;
+    this.setChecks = sets.map(d => h("input", { type: "checkbox", value: d.name, "data-size": d.size, checked: d.size === size0, onchange: () => this.checkSizes() }));
+    this.sizeWarn = h("p", { class: "warn small", hidden: true, style: "margin:0" });
+    this.f.use_real.checked = nLab > 0;
+    this.f.use_real.disabled = nLab === 0;
+    this.dataBox.replaceChildren(
+      sets.length ? h("div", { class: "small muted" }, "Simulated scans (the right answers are known exactly):") :
+        h("div", { class: "banner" }, `There are no simulated ${kindShort(this.kind).toLowerCase()} scans yet. `,
+          h("a", { href: "#/synthetic" }, "Make some"), " first (3000 or more), then come back."),
+      ...sets.map((d, i) => h("label", { class: "check" }, this.setChecks[i], `${d.name}: ${d.n} scans, ${d.size} x ${d.size} pixels`)),
+      this.sizeWarn,
+      h("label", { class: "check", style: "margin-top:4px" }, this.f.use_real,
+        nLab ? `Also learn from your labelled ${kindShort(this.kind).toLowerCase()} scans (${nLab})` : `Your labelled scans (none of this kind yet)`),
+      h("div", { class: "hint" }, "Some of the scans are kept out of training to test the model. The test results are shown on the Models page."));
+    this.checkSizes();
+  },
+  checkSizes() {
+    const sizes = [...new Set((this.setChecks || []).filter(c => c.checked).map(c => +c.dataset.size))];
+    const bad = sizes.length > 1;
+    this.sizeWarn.hidden = !bad;
+    this.sizeWarn.textContent = bad ? "These sets have different image sizes. Choose sets of one size." : "";
+    this.startBtn.disabled = bad;
+    return sizes[0] || { PvP: 96, PvT: 64, tiebar: 64 }[this.kind];
+  },
+  renderWhere() {
+    const opt = (w, title, text) => h("label", { class: `choice${this.where === w ? " on" : ""}` },
+      h("input", { type: "radio", name: "train-where", checked: this.where === w, onchange: () => { this.where = w; this.renderWhere(); } }),
+      h("div", {}, h("b", {}, title), h("div", { class: "small muted" }, text)));
+    this.whereBox.replaceChildren(
+      opt("here", "This computer", "Uses this computer's GPU if it has one, else its processor. On a processor, a model takes from about 20 minutes to 2 hours, and the computer is slow meanwhile."),
+      opt("elsewhere", "Another computer, for example one with a GPU", "ChargeCell packs the training data into one file. A training computer picks it up, trains, and sends the model back here. You can follow its progress on this page."));
+    this.startBtn.textContent = this.where === "here" ? "Start training" : "Send to a training computer";
+    if (this.where === "here") { this.remoteHelp.replaceChildren(); return; }
+    this.renderRemoteHelp();
+  },
+  async renderRemoteHelp() {
+    const w = this.setup || (this.setup = await api("/api/worker/setup"));
+    const cmd = url => `chargecell worker --server ${url} --token ${w.token}`;
+    const parts = [
+      h("div", { class: "small" }, h("b", {}, "On the training computer: "),
+        `install ChargeCell ${w.chargecell} (the same version as here) and a PyTorch with GPU support (see pytorch.org). Then run the command below. It keeps running and trains every job you send, one at a time.`)];
+    if (w.reachable) {
+      parts.push(cmdBox(cmd(w.urls[0])));
+      if (w.urls.length > 1) parts.push(h("div", { class: "hint" }, `If the training computer cannot find "${w.urls[0].split("//")[1].split(":")[0]}", use ${w.urls.slice(1).join(" or ")} instead.`));
+    } else {
+      parts.push(
+        h("div", { class: "banner small" }, "This ChargeCell only accepts connections from this computer. Choose one of two ways:"),
+        h("div", { class: "small" }, h("b", {}, "A. Let the lab network reach it. "), "Stop ChargeCell and start it again with:"),
+        cmdBox(`chargecell -w <workspace folder> serve --host 0.0.0.0 --port ${w.port}`),
+        h("div", { class: "hint" }, "Only on a network you trust: the web page has no password. This page will then show the worker command."),
+        h("div", { class: "small" }, h("b", {}, "B. Keep it private and connect through SSH. "), `On the training computer, run the first command (it keeps a secure tunnel open), then the second one in another terminal:`),
+        cmdBox(`ssh -N -L ${w.port}:localhost:${w.port} <your user name>@${w.computer}`),
+        cmdBox(cmd(`http://localhost:${w.port}`)));
+    }
+    parts.push(h("div", { class: "hint" }, "No network between the two computers? Start the training anyway, then download the training-job file from the panel on the right and carry it over. On the training computer, ",
+      h("code", {}, "chargecell train-job <file>"), " writes a model file; add it on the Models page."));
+    this.remoteHelp.replaceChildren(h("div", { class: "remote-help stack", style: "gap:8px" }, ...parts));
+  },
+
+  async start(e) {
     const f = this.f;
-    const synthetic = [...this.dsBox.querySelectorAll("input:checked")].map(i => i.value);
-    const body = { synthetic, kind: f.kind.value, size: +f.size.value, use_real: f.use_real.checked, only_reviewed: f.only_reviewed.checked,
-      real_weight: +f.real_weight.value, epochs: +f.epochs.value, ensemble: +f.ensemble.value, base: +f.base.value,
-      batch_size: +f.batch_size.value, lr: +f.lr.value, target_precision: +f.target_precision.value, notes: f.notes.value };
-    const job = await api("/api/train", { method: "POST", json: body });
-    toast("Training started");
-    this.jobId = job.id;
-    this.watch();
+    const synthetic = (this.setChecks || []).filter(c => c.checked).map(c => c.value);
+    const body = {
+      kind: this.kind, synthetic, size: this.checkSizes(), use_real: f.use_real.checked && !f.use_real.disabled,
+      only_reviewed: f.only_reviewed.checked, real_weight: +f.real_weight.value, epochs: +f.epochs.value,
+      ensemble: +f.ensemble.value, base: +f.base.value, batch_size: +f.batch_size.value, lr: +f.lr.value,
+      target_precision: Math.min(0.999, +f.target_precision.value / 100), notes: f.notes.value,
+      name: f.name.value.trim(), use_when_done: f.use_when_done.checked, where: this.where,
+    };
+    e.target.disabled = true;
+    try {
+      const job = await api("/api/train", { method: "POST", json: body });
+      toast(this.where === "here" ? "Training started" : "Preparing the training data for the other computer");
+      this.jobId = job.id;
+      f.name.value = "";
+      pollStatus();
+      this.watch();
+    } finally { e.target.disabled = false; this.checkSizes(); }
   },
+
   async watch() {
     clearTimeout(this._t);
     if (location.hash.split("/")[1] !== "train") return;
-    const jobs = await api("/api/jobs", { quiet: true }) || [];
-    const job = jobs.find(j => j.kind === "train" && (j.id === this.jobId || ["running", "queued"].includes(j.state))) || jobs.find(j => j.kind === "train");
+    const jobs = (await api("/api/jobs", { quiet: true }) || []).filter(j => j.kind === "train");
+    const live = ["queued", "preparing", "waiting", "running"];
+    const job = jobs.find(j => j.id === this.jobId) || jobs.find(j => live.includes(j.state)) || jobs[0];
     if (job) {
       const full = await api(`/api/jobs/${job.id}`, { quiet: true });
+      if (full && full.state === "done" && full.result && !S.models.find(m => m.id === full.result.model_id)) await loadModels();
       if (full) this.renderProgress(full);
-      if (["running", "queued"].includes(job.state)) this._t = setTimeout(() => this.watch(), 2000);
-    } else this.progress.replaceChildren(h("div", { class: "panel muted" }, "No training runs yet."));
+    } else this.progress.replaceChildren(h("div", { class: "panel muted" }, "No training yet. Your training will show here."));
+    this.renderRecent(jobs, job);
+    if (jobs.some(j => live.includes(j.state))) this._t = setTimeout(() => this.watch(), 2000);
   },
   renderProgress(j) {
     const chart = h("canvas", { class: "chart" });
+    const w = j.worker || {}, ago = minutesAgo(j.last_seen), remote = j.where === "remote";
+    const lines = [];
+    if (j.state === "waiting") lines.push(
+      h("p", { class: "small", style: "margin:0" }, "Waiting for a training computer. Start the worker command there (step 3 on the left), or carry the training-job file over by hand."),
+      h("div", { class: "row" }, h("a", { class: "button", href: `/api/jobs/${j.id}/job-file` }, "Download the training-job file")));
+    if (j.state === "running" && remote) lines.push(h("p", { class: "small", style: "margin:0" },
+      `Training on ${w.computer || "another computer"} (${w.device || "unknown device"}). Last news ${ago === 0 ? "just now" : ago + " min ago"}.`),
+      ago != null && ago >= 5 ? h("p", { class: "warn small", style: "margin:0" }, `No news for ${ago} minutes. Is the worker still running on ${w.computer || "the training computer"}?`) : null);
+    if (j.state === "done" && j.result) {
+      const m = (S.models || []).find(x => x.id === j.result.model_id);
+      lines.push(h("p", { class: "small", style: "margin:0" }, `The new model is called "${j.result.name}". `,
+        h("a", { href: "#/models" }, "See its test results on the Models page"), "."),
+        m && !m.in_use ? h("div", {}, h("button", { class: "primary", onclick: async () => { await useModel(m); this.watch(); } }, "Use it now")) :
+          m ? h("div", {}, h("span", { class: "flag ok" }, "In use")) : null);
+    }
+    if (j.state === "failed") lines.push(h("p", { class: "warn", style: "margin:0" }, j.error || j.message),
+      remote && j.job_file ? h("div", { class: "row" }, h("button", { onclick: async () => { await api(`/api/jobs/${j.id}/retry`, { method: "POST" }); toast("Offered to training computers again"); this.watch(); } }, "Try again"),
+        h("span", { class: "hint" }, "The same training data is offered to training computers again.")) : null);
+    if (j.state === "interrupted") lines.push(h("p", { class: "warn small", style: "margin:0" }, "ChargeCell was restarted while this was training here. Start the training again."));
+    const active = ["queued", "preparing", "waiting", "running"].includes(j.state);
     this.progress.replaceChildren(h("div", { class: "panel stack" },
-      h("div", { class: "row" }, h("h2", { style: "margin:0" }, "Latest training run"), h("span", { class: "spacer" }),
-        ["running", "queued"].includes(j.state) ? h("button", { onclick: () => api(`/api/jobs/${j.id}/cancel`, { method: "POST" }) }, "Cancel") : null),
+      h("div", { class: "row" }, h("h2", { style: "margin:0" }, active ? "Training now" : "Latest training"), h("span", { class: "spacer" }),
+        active ? h("button", { onclick: async () => { if (confirm("Stop this training?")) { await api(`/api/jobs/${j.id}/cancel`, { method: "POST" }); this.watch(); } } }, "Cancel") : null),
+      h("div", {}, h("b", {}, j.title), h("div", { class: "small muted" }, `${remote ? "On another computer" : "On this computer"} · started ${when(j.created)}`)),
       h("div", { class: "progress" }, h("i", { style: `width:${j.progress * 100}%` })),
-      h("div", { class: "small" }, `${j.state}: ${j.message}`),
-      j.error ? h("p", { class: "warn" }, j.error) : null,
-      chart, h("div", { class: "small muted" }, "Lines: training loss per ensemble member (left axis). Dots: validation status accuracy (right axis).")));
-    requestAnimationFrame(() => drawTrainChart(chart, j.history || []));
-    if (j.state === "done") this.refresh();
+      h("div", { class: "small" }, jobText(j)),
+      ...lines,
+      (j.history || []).length || j.state === "running" ? [chart, h("div", { class: "hint" }, "Lines: training error of each network (lower is better; left scale). Dots: share of test scans with the right answer (right scale).")] : null));
+    if ((j.history || []).length || j.state === "running") requestAnimationFrame(() => drawTrainChart(chart, j.history || []));
   },
-  async refresh() {
-    const ms = await api("/api/models");
-    if (!ms.length) { this.models.replaceChildren(h("p", { class: "muted" }, "No model versions yet.")); return; }
-    this.models.replaceChildren(...ms.map(m => {
-      const metr = m.metrics || {};
-      const block = (name, x) => x ? h("div", {}, h("h3", {}, name === "real" ? `Held-out real scans (${x.n})` : `Held-out synthetic scans (${x.n})`),
-        h("div", { class: "metric-grid" },
-          h("div", { class: "metric" }, h("b", {}, pct(x.found_precision)), h("span", {}, "FOUND calls that are right")),
-          h("div", { class: "metric" }, h("b", {}, pct(x.found_recall)), h("span", {}, "true FOUND windows found")),
-          h("div", { class: "metric" }, h("b", {}, pct(x.status_accuracy)), h("span", {}, "outcome correct")),
-          h("div", { class: "metric" }, h("b", {}, pct(x.occupancy_pixel_accuracy)), h("span", {}, "electron count per pixel"))),
-        h("details", {}, h("summary", {}, "Confusion matrix and line scores"),
-          h("table", { class: "list", style: "margin-top:6px;width:auto" },
-            h("tr", {}, h("th", {}, "true \\ predicted"), x.confusion_labels.map(l => h("th", {}, SHORT_STATUS[l]))),
-            x.confusion.map((row, i) => h("tr", {}, h("td", {}, SHORT_STATUS[x.confusion_labels[i]]), row.map(v => h("td", {}, v))))),
-          h("p", { class: "small" }, "Line F1: " + Object.entries(x.line_f1).map(([k, v]) => `${k} ${v}`).join(", ")))) : null;
-      return h("div", { class: "panel" },
-        h("div", { class: "row" }, h("b", {}, shortId(m.id)), h("span", { class: "pill" }, m.kind || "PvP"), h("span", { class: "muted small" }, when(m.created)),
-          m.active ? h("span", { class: "flag ok" }, "Active") : h("button", { onclick: async () => { await api(`/api/models/${m.id}/activate`, { method: "POST" }); toast("Model activated"); this.refresh(); pollStatus(); } }, "Make active"),
-          h("span", { class: "spacer" }),
-          h("span", { class: "small muted" }, `${m.config.ensemble} members, ${m.config.size}px, ${m.data.n_train} training scans (${m.data.n_real_train} real), FOUND threshold ${m.found_threshold}`)),
-        m.config.notes ? h("p", { class: "small" }, m.config.notes) : null,
-        m.split_note ? h("p", { class: "warn small" }, m.split_note) : null,
-        block("real", metr.real), block("synthetic", metr.synthetic),
-        !metr.real ? h("p", { class: "small muted" }, "No held-out real scans yet: label scans from at least two cooldowns to measure real-data performance.") : null);
-    }));
+  renderRecent(jobs, shown) {
+    const rest = jobs.filter(j => !shown || j.id !== shown.id).slice(0, 6);
+    this.recent.replaceChildren(rest.length ? h("div", { class: "panel" }, h("h2", {}, "Earlier training"),
+      h("div", { class: "stack", style: "gap:6px" }, rest.map(j => h("a", { class: "job-row", href: "#/train", onclick: e => { e.preventDefault(); this.jobId = j.id; this.watch(); } },
+        h("b", {}, j.title), h("span", { class: "small muted" }, `${when(j.created)} · ${jobText(j)}`))))) : "");
   },
 };
 
@@ -1398,7 +1778,7 @@ function drawTrainChart(c, hist) {
   const dpr = window.devicePixelRatio || 1, w = c.clientWidth, hh = c.clientHeight;
   c.width = w * dpr; c.height = hh * dpr;
   const ctx = c.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  if (!hist.length) { ctx.fillStyle = "#5B6878"; ctx.font = "13px system-ui"; ctx.fillText("Waiting for the first epoch", 10, 20); return; }
+  if (!hist.length) { ctx.fillStyle = "#5B6878"; ctx.font = "13px system-ui"; ctx.fillText("Waiting for the first pass over the data", 10, 20); return; }
   const L = 40, R = 40, T = 10, B = 22, W = w - L - R, H = hh - T - B;
   const members = [...new Set(hist.map(r => r.member))];
   const maxEp = Math.max(...hist.map(r => r.epoch)), maxLoss = Math.max(...hist.map(r => r.train_loss));
@@ -1406,7 +1786,7 @@ function drawTrainChart(c, hist) {
   ctx.strokeStyle = "#CBD3DC"; ctx.strokeRect(L, T, W, H);
   ctx.fillStyle = "#5B6878"; ctx.font = "11px system-ui";
   ctx.fillText(maxLoss.toFixed(2), 4, T + 8); ctx.fillText("0", 28, T + H); ctx.fillText("100%", w - R + 4, T + 8);
-  ctx.fillText("epoch", L + W / 2 - 14, hh - 4);
+  ctx.fillText("pass", L + W / 2 - 12, hh - 4);
   const colors = ["#2E5AAC", "#13808A", "#7A4FB5", "#8A7A1E", "#A86400", "#17202B"];
   members.forEach((m, k) => {
     const rs = hist.filter(r => r.member === m);
@@ -1423,7 +1803,7 @@ pages.device = {
   build() {
     this.root = $("#page-device");
     this.form = h("div", { class: "stack" });
-    this.root.append(h("header", {}, h("h1", {}, "Device"), this.select = h("select", { onchange: () => this.show(this.select.value) }),
+    this.root.append(h("header", {}, h("h1", {}, "Device settings"), this.select = h("select", { onchange: () => this.show(this.select.value) }),
       h("button", { onclick: () => { const n = prompt("Name of the new device"); if (n) this.show(n, true); } }, "New device")), this.form);
   },
   async enter() {
@@ -1462,15 +1842,15 @@ pages.device = {
     const L = (t, el, help) => h("label", { title: help || null }, t, el);
     this.form.replaceChildren(
       h("div", { class: "panel stack" }, h("h2", { style: "margin:0" }, name),
-        h("p", { class: "small muted", style: "margin:0" }, "All settings are optional; ChargeCell assumes no voltage scale. Unset values are measured from your scans or taken as a fraction of the current window. Recommended scans stay inside the safe limits you set, and moves larger than the step limit are split."),
+        h("p", { class: "small muted", style: "margin:0" }, "All settings are optional; ChargeCell assumes nothing about your voltages. Settings left blank are measured from your scans, or taken as a fraction of the current scan. Suggested scans stay inside the safe limits you set, and larger moves are split into steps."),
         h("div", { class: "fields" }, L("Description", f.description), L("Carriers", f.carrier, "Electrons: more plunger voltage adds electrons. Holes: less voltage adds holes."),
           L("Plunger gates", f.plungers, "Comma separated, e.g. P1, P2, P3"), L("Sensor gate", f.sensor_gate), L("Exchange gates", f.barriers, "Which gate sits between each pair, e.g. P1-P2=X1, P2-P3=X2"),
           L("Tunnel gates", f.tunnel_gates, "Reservoir tunnel gate next to each edge plunger, e.g. P1=T1, P3=T2"),
-          L("Max move (mV)", f.max_step, "Largest single DC step ChargeCell will suggest; bigger moves are split. Blank: at most one window width"),
-          L("Exchange-gate step (mV)", f.barrier_step, "How far to change an exchange gate for merged dots or tie-bar coupling. Blank: a quarter of the electron spacing"),
+          L("Largest single step (mV)", f.max_step, "The largest gate change ChargeCell will suggest in one go; bigger moves are split into steps. Blank: at most one scan width"),
+          L("Exchange-gate step (mV)", f.barrier_step, "How far to change an exchange gate when the dots are merged or the tie bar needs adjusting. Blank: a quarter of the spacing between electrons"),
           L("Electron temperature (mK)", f.electron_temperature, "Optional. With lever arms, tie-bar results are also given in µeV"),
           L("Tie-bar coupling target", f.tiebar_target, "Optional band for the tie-bar coupling ratio (interdot width / tie-bar length), e.g. 0.05, 0.3"),
-          L("Points per electron", f.points_per_addition, "Resolution target for suggested scans"), L("Min points per axis", f.min_points), L("Max points per axis", f.max_points)),
+          L("Points per electron", f.points_per_addition, "How many scan points suggested scans put between two electrons"), L("Fewest points per axis", f.min_points), L("Most points per axis", f.max_points)),
         h("p", { class: "small muted", style: "margin:0" }, "Gate names follow the HRL convention: P plungers, X exchange gates, T reservoir tunnel gates, M sensor. Hover over a field for help.")),
       h("div", { class: "panel" }, h("h2", {}, "Gates"),
         h("table", { class: "list" }, h("tr", {}, h("th", {}, "Gate"), h("th", {}, "Safe minimum (V)"), h("th", {}, "Safe maximum (V)"), h("th", {}, "Typical spacing between electrons (mV)"), h("th", {}, "Lever arm (eV/V)")),
@@ -1508,28 +1888,34 @@ async function pollStatus() {
   const running = st.running_jobs || [];
   const ind = $("#job-indicator");
   if (running.length) {
-    const j = running[0];
+    const j = running.find(x => x.state === "running") || running[0];
     ind.hidden = false;
-    ind.replaceChildren(h("div", {}, j.title), h("div", { class: "small muted" }, j.message), h("div", { class: "bar" }, h("i", { style: `width:${j.progress * 100}%` })));
+    ind.replaceChildren(h("a", { href: j.kind === "train" ? "#/train" : j.kind === "synthetic" ? "#/synthetic" : "#/scans" },
+      h("div", {}, j.title), h("div", { class: "small muted" }, jobText(j)), h("div", { class: "bar" }, h("i", { style: `width:${j.progress * 100}%` })),
+      running.length > 1 ? h("div", { class: "small muted" }, `and ${running.length - 1} more`) : null));
   } else ind.hidden = true;
   for (const id of S.running) {
     if (!running.find(j => j.id === id)) {
       const j = await api(`/api/jobs/${id}`, { quiet: true });
-      if (j) toast(j.state === "done" ? `Finished: ${j.title}` : `${j.title}: ${j.message}`, j.state === "failed" ? "error" : "");
+      if (j) toast(j.state === "done" ? `Finished: ${j.title}` : `${j.title}: ${jobText(j)}`, j.state === "failed" ? "error" : "");
+      if (j && j.kind === "train") await loadModels();
       const page = location.hash.split("/")[1];
       if (page === "synthetic") pages.synthetic.refresh();
-      if (page === "train") { pages.train.enter(); }
+      if (page === "train") pages.train.watch();
       if (page === "scans") pages.scans.enter();
+      if (page === "home" || page === "models") pages[page].enter();
     }
   }
   S.running = new Set(running.map(j => j.id));
-  const act = Object.keys(st.active_models || {});
-  $("#model-indicator").textContent = act.length ? `Models: ${act.join(", ")}` : "No model yet";
+  const act = st.active_models || {};
+  $("#model-indicator").replaceChildren(h("a", { href: "#/models", title: "Models in use. Click to switch." },
+    h("div", { class: "rail-label" }, "Models in use"),
+    Object.keys(KINDS).map(k => h("div", { class: act[k] ? "" : "none" }, act[k] ? "\u2713 " : "\u2013 ", KINDS[k].short))));
 }
 
 async function route() {
   const parts = location.hash.replace(/^#\/?/, "").split("/");
-  const name = pages[parts[0]] ? parts[0] : "review";
+  const name = pages[parts[0]] ? parts[0] : "home";
   const arg = parts[1] ? decodeURIComponent(parts[1]) : null;
   document.querySelectorAll(".page").forEach(p => { p.hidden = p.id !== `page-${name}`; });
   document.querySelectorAll(".rail a").forEach(a => a.classList.toggle("active", a.dataset.page === name));

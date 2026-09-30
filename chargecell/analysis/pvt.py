@@ -33,7 +33,7 @@ from .recommend import (_points, common_fix, confirm_rescan, describe_move, fina
 
 SPEC = kinds.PVT
 UNCONFIRMED_TEXT = ("The empty dot and its first two loading lines appear to be traced and every "
-                    "check passed, but the model's confidence is below its calibrated threshold.")
+                    "check passed, but the model is not sure enough to call it found.")
 SLOW, GOOD, OPEN = 0, 1, 2
 
 
@@ -208,7 +208,8 @@ def analyze_pvt(ws: Workspace, scan: Scan, model_id: str | None = None,
     checks, gate_fails = [], []
     if status == schema.FOUND:
         if sp[0] < tau:
-            checks.append(f"confidence {sp[0]:.2f} is below the calibrated threshold {tau:.2f}")
+            checks.append(f"the model is {100 * sp[0]:.3g}% sure, and it needs to be "
+                          f"{100 * tau:.3g}% sure to say found")
         gate_fails = pvt_found_gates(p, S)
         checks += gate_fails
         if checks:
@@ -319,15 +320,16 @@ def recommend_pvt(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: str,
         op = geo["keypoints"]["operating_point"]
         lo, hi = geo["keypoints"].get("tunnel_gate_clean_from"), geo["keypoints"].get("tunnel_gate_clean_to")
         rec.update(kind="found", confidence="high", target=op,
-                   basis="empty dot and first two loading lines traced where electrons load cleanly")
+                   basis="the empty dot and its first two loading lines are traced where "
+                         "electrons load cleanly")
         rec["headline"] = (f"One electron: set {xg} = {fmt_v(op[xg], wx)} with {yg} = "
                            f"{fmt_v(op[yg], wy)}.")
         band_txt = (f"from {fmt_v(lo, wy)}" if lo is not None else "from below this window") + \
             (f" to {fmt_v(hi, wy)}" if hi is not None else " to above this window")
         steps.append(f"Electrons load cleanly for {yg} {band_txt}; the operating point sits "
                      "in the lower part of that range.")
-        steps.append(f"Between the 0->1 and 1->2 loading lines the dot under {xg} holds exactly "
-                     "one electron.")
+        steps.append(f"Between the loading line of the first electron (0 to 1) and that of the "
+                     f"second (1 to 2), the dot under {xg} holds exactly one electron.")
         return rec
 
     if status == schema.UNINTERPRETABLE:
@@ -341,7 +343,7 @@ def recommend_pvt(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: str,
             nx = int(min(cfg.max_points, max(2 * nx_cur, cfg.min_points)))
             rec["headline"] = f"Too few points to resolve the loading lines. Rescan with {nx} points along {xg}."
         else:
-            rec["headline"] = "The scan cannot be interpreted. Check the setup and rescan."
+            rec["headline"] = "This scan cannot be read. Check the setup and rescan."
         steps += quality.get("warnings", [])
         rec["next_window"] = {"x_gate": xg, "y_gate": yg, "x": [*x_rng, nx], "y": [*y_rng, ny]}
         steps.append("Rescan the same window after the fix.")
@@ -365,9 +367,9 @@ def recommend_pvt(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: str,
         # confirmed once already and every check still passed except the confidence: the reason
         # head's pick is no evidence, so do not walk away from the goal; show more around it
         wf_x = wf_y = 1.5
-        basis = ("every check passed except the confidence, also after a confirmation scan: a "
-                 "1.5x wider window around the same centre shows more of the empty dot and of "
-                 f"the {yg} range")
+        basis = ("every check passed, but the model was not sure enough, also after a "
+                 "confirmation scan: a window 1.5 times wider around the same centre shows more "
+                 f"of the empty dot and of the {yg} range")
     elif reason in ("tunnel_rate_too_low", "reservoir_too_open") and good_band is not None \
             and good_band[1] - good_band[0] >= 2:
         # a clean band is in view: centre the tunnel gate on it
@@ -375,10 +377,10 @@ def recommend_pvt(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: str,
         basis = f"electrons load cleanly only over part of this {yg} range: centre on it"
     elif reason == "tunnel_rate_too_low":
         dj = 0.6 * (S - 1)
-        basis = f"loading lines fade out: open {yg} (faster tunnelling)"
+        basis = f"loading lines fade out: raise {yg} so electrons tunnel in faster"
     elif reason == "reservoir_too_open":
         dj = -0.5 * (S - 1)
-        basis = f"loading lines are smeared: close {yg} (slower tunnelling)"
+        basis = f"loading lines are smeared: lower {yg} so electrons tunnel in more slowly"
     elif reason == "no_reference":
         lowest = min((line_i(l, c0, S) for l in seen_lines), default=None)
         s_i = _spacing_index(seen_lines, cfg, xg, grid, S)
@@ -400,7 +402,7 @@ def recommend_pvt(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: str,
     else:                                   # no_transitions: explore toward more electrons and
         di, dj = 0.5 * (S - 1), 0.5 * (S - 1)   # faster tunnelling
         confidence = "low"
-        basis = "nothing in view: explore toward more electrons and a more open tunnel gate"
+        basis = "nothing in view: search toward more electrons and a more open tunnel gate"
     # follow the tilt of the loading lines when moving the tunnel gate
     di += tilt * dj
     (xa, ya) = grid.to_volts(c0 + di - wf_x * (S - 1) / 2, c0 + dj - wf_y * (S - 1) / 2)
@@ -415,15 +417,17 @@ def recommend_pvt(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: str,
                next_window={"x_gate": xg, "y_gate": yg, "x": [*win["x"], nx],
                             "y": [*win["y"], ny]})
     action = describe_move(win["move"], scan)
-    rec["headline"] = {"tunnel_rate_too_low": f"Electrons cannot load at this {yg}. ",
-                       "reservoir_too_open": f"The dot is poorly isolated at this {yg}. ",
+    rec["headline"] = {"tunnel_rate_too_low": f"Electrons cannot load at this {yg}: it is too "
+                                              "closed. ",
+                       "reservoir_too_open": f"{yg} is too open: the dot is not separated well "
+                                             "enough from its reservoir. ",
                        "no_reference": "The empty dot is not in view. ",
                        "occupancy_too_low": "Only the first electron is in view. ",
                        }.get(reason, "No loading lines in view. ") + f"Next: {action}."
     if held_back_by == "confidence":
         rec["headline"] = ("The empty dot and its first loading lines appear to be in view, but the "
-                           "model is still not sure enough. Next: a 1.5x wider window around the "
-                           "same centre.")
+                           "model is still not sure enough. Next: a window 1.5 times wider "
+                           "around the same centre.")
     steps.append(window_step(scan, win["x"], win["y"], nx, ny))
     steps.append(f"Why: {basis}.")
     return rec

@@ -186,3 +186,39 @@ Each entry: the decision, why, and what would change it. Newest last.
     window centre after any move of more than one electron spacing (`retune_sensor` in the
     recommendation and the protocol), practice devices do it, and the operator guide says so.
     This is what an expert does, and HRL's tune-up retunes its sensor dot between steps.
+
+33. **Easy switching and model files (user request, 2026-09-30).** "Making sure we can easily
+    switch models." Each model gets a name and a plain summary of its test results; the Models
+    page and `chargecell models` switch, rename, download and delete. A model file is the
+    model folder as a zip with a manifest (format `chargecell-model/1`); adding one validates
+    it fully first, so a bad file never replaces a working model. Adding the same weights twice
+    is a no-op, and a model is put in use automatically only when it is the first of its kind.
+    After a switch, old results are kept (they record which model made them) and the operator is
+    offered a re-analysis, rather than re-analysing silently.
+
+34. **Training on another computer: the worker pulls (user request, 2026-09-30).** "Making sure
+    it's easy to train on gpu that might not on the same machine as the web ui." Options were:
+    the GUI pushes jobs to a training server (needs an open port and a service on the GPU
+    computer), a shared folder (needs one), or a worker that pulls from the GUI computer. The
+    worker pulls: one command on the training computer, works through firewalls and SSH tunnels,
+    and several workers can share the queue. Everything a training needs travels in one
+    training-job file, which also covers the case with no network at all (carry it over, run
+    `chargecell train-job`, add the model file). Worker calls need a token stored in the
+    workspace; the web page itself still has no login, so it listens only on 127.0.0.1 unless
+    the operator starts it with `--host`, and says so. Remote jobs survive a restart of the GUI
+    computer (the job file is on disk), can be cancelled from the Train page while training
+    (the worker stops at its next progress report), and can be retried after a failure.
+
+35. **A task-first web page in plain language (user request, 2026-09-30).** "Making sure the
+    user interface is really easy to use and intuitive" and "jargon free ... add a glossary to
+    the readme." The page opens on Home (main tasks, a getting-started checklist, the models in
+    use); the rail groups everyday pages (Scans, Review, Label, History) apart from model work
+    (Models, Train, Simulated scans) and setup (Device settings). Training is four questions on
+    one page (what kind, what data, where, what name) with the rest under "More settings"; the
+    image size follows from the chosen data. Labels and messages avoid machine-learning and
+    software words ("found" threshold, not calibrated precision; networks, not ensemble members;
+    History, not automation tree; "can't read", not uninterpretable). Terms of the physics that
+    cannot be avoided (plunger, tie bar, triple point, Coulomb peak, ...) are explained in the
+    README glossary. The protocol's field names and enum values are unchanged: only the words
+    shown to people changed.
+

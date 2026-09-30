@@ -53,8 +53,17 @@ GOAL = {
 }
 OUTCOME_TITLE = {"found": "Found", "next_scan": "Next scan",
                  "no_confident_step": "No confident next step"}
-STATUS_TITLE = {schema.FOUND: "Found", schema.NOT_IN_WINDOW: "Not in this window",
-                schema.UNINTERPRETABLE: "Can't interpret"}
+STATUS_TITLE = {schema.FOUND: "Found", schema.NOT_IN_WINDOW: "Not in this scan",
+                schema.UNINTERPRETABLE: "Can't read"}
+# short plain names of the reasons, for History entries (the GUI has the same list)
+REASON_SHORT = {
+    "none": "goal in view", "no_transitions": "no charge lines",
+    "occupancy_too_low": "scan stops before the goal", "no_reference": "no empty region",
+    "partially_visible": "cut off at the edge", "low_snr": "too noisy",
+    "sensor_insensitive": "sensor not sensitive", "dots_merged": "dots merged",
+    "charge_instability": "charges jump", "resolution_too_coarse": "too few points",
+    "tunnel_rate_too_low": "tunnel gate too closed", "reservoir_too_open": "tunnel gate too open",
+    "no_tiebar": "no tie bar in view"}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -325,13 +334,15 @@ def _add_analysis(ws: Workspace, run: dict, measure: dict, scan: Scan,
     conf = float(analysis.get("confidence") or 0.0)
     spec = kinds.KINDS.get(kind, kinds.PVP)
     text = analysis.get("reason_text") or spec.reason_text.get(reason, reason)
-    extra = [f"confidence {conf:.2f}"]
+    extra = [f"the model was {100 * conf:.0f}% sure"]
     if needs_review:
-        extra.append("needs review")
+        extra.append("please check")
     if truth is not None:
         extra.append("right" if truth.get("correct") else "WRONG" if truth.get("correct") is False
-                     else f"truth: {STATUS_TITLE[truth['status']].lower()}, {truth['reason']}")
-    title = STATUS_TITLE[status] + (f": {reason}" if reason != "none" else "")
+                     else f"true answer: {STATUS_TITLE[truth['status']].lower()}, "
+                          f"{REASON_SHORT.get(truth['reason'], truth['reason'])}")
+    title = STATUS_TITLE[status] + (f": {REASON_SHORT.get(reason, reason)}"
+                                    if reason != "none" else "")
     an = _add(run, measure["id"], "analysis", title,
               f"{text} ({', '.join(extra)})", grade, dict(
                   status=status, reason=reason, kind=kind, confidence=conf,
@@ -448,7 +459,7 @@ def record_review(ws: Workspace, scan_id: str, annotation: dict) -> dict | None:
         who = annotation.get("annotator") or "someone"
         text = f"{who} labelled it {STATUS_TITLE.get(status, status).lower()}"
         if annotation.get("reason"):
-            text += f" ({annotation['reason']})"
+            text += f" ({REASON_SHORT.get(annotation['reason'], annotation['reason'])})"
         text += "; agrees with the analysis" if agrees else (
             f"; the analysis said {STATUS_TITLE[said].lower()}" if said else "")
         n = _add(run, measure["id"], "review", "Label", text, "pass" if agrees else "warn",
@@ -515,7 +526,7 @@ def _regrade(run: dict) -> None:
     root["grade"] = run["grade"] = grade
     n = sum(1 for x in run["nodes"] if x["type"] == "measure")
     reached = sum(1 for g in grades if g == "pass")
-    root["summary"] = (f"{n} scan{'s' if n != 1 else ''}, {len(stages)} stage"
+    root["summary"] = (f"{n} scan{'s' if n != 1 else ''}, {len(stages)} goal"
                        f"{'s' if len(stages) != 1 else ''} ({reached} reached)"
                        + (f"; {closed['result']}" if closed else "; in progress"))
 

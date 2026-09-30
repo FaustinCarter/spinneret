@@ -14,19 +14,25 @@
       <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M10 2v10l-4 4v14M22 2v8l4 4v16M2 12h8l12-2h8M2 24h8l12-2h8" stroke="currentColor" stroke-width="1.6" fill="none"/><rect x="11.5" y="13" width="9" height="8" fill="var(--accent)"/></svg>
       <span>ChargeCell</span>
     </div>
+    <a href="#/home" data-page="home">Home</a>
+    <a href="#/scans" data-page="scans">Scans</a>
     <a href="#/review" data-page="review">Review</a>
     <a href="#/label" data-page="label">Label</a>
-    <a href="#/scans" data-page="scans">Scans</a>
-    <a href="#/runs" data-page="runs">Runs</a>
-    <a href="#/synthetic" data-page="synthetic">Synthetic data</a>
+    <a href="#/runs" data-page="runs">History</a>
+    <div class="rail-group">Models</div>
+    <a href="#/models" data-page="models">Models</a>
     <a href="#/train" data-page="train">Train</a>
-    <a href="#/device" data-page="device">Device</a>
+    <a href="#/synthetic" data-page="synthetic">Simulated scans</a>
+    <div class="rail-group">Setup</div>
+    <a href="#/device" data-page="device">Device settings</a>
     <div class="rail-foot">
       <div id="job-indicator" hidden></div>
-      <div id="model-indicator" class="muted small"></div>
+      <div id="model-indicator" class="small"></div>
     </div>
   </nav>
   <main id="main">
+    <section id="page-home" class="page" hidden></section>
+    <section id="page-models" class="page" hidden></section>
     <section id="page-review" class="page" hidden></section>
     <section id="page-label" class="page" hidden></section>
     <section id="page-scans" class="page" hidden></section>

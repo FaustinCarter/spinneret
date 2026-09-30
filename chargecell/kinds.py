@@ -130,9 +130,9 @@ TIEBAR = KindSpec(
     uninterpretable=TIEBAR_REASONS[3:],
     reason_text={
         **_COMMON_TEXT,
-        "none": "The (1,1)-(2,0) transition (the tie bar) and both of its triple points are in "
+        "none": "The (1,1)-(2,0) line (the tie bar) and both of its triple points are in "
                 "the window.",
-        "no_tiebar": "The (1,1)-(2,0) transition is not in this window.",
+        "no_tiebar": "The (1,1)-(2,0) line is not in this window.",
         "partially_visible": "The tie bar runs off the edge of the window.",
         "dots_merged": "The two dots are so strongly coupled that the tie bar has no distinct "
                        "ends.",

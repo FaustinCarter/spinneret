@@ -32,12 +32,16 @@ chargecell/
   client.py            stdlib-only HTTP client and request builder for measurement code
   virtual.py           practice devices (P, X, T gates; any kind); closed-loop evaluation per kind
   runs.py              automation tree: graded record of every tune-up run; statistics across runs
-  jobs.py              background JobManager (one worker thread)
+  modelstore.py        model versions: names, plain-language quality, switching, model files (zip)
+  remote.py            training-job files: pack a training for another computer, run it there
+  worker.py            `chargecell worker`: trains jobs from a ChargeCell server over HTTP
+  jobs.py              background JobManager (one worker thread; remote jobs wait for a worker)
   server/app.py        FastAPI app (create_app) behind the GUI
   server/static/       index.html, style.css, plot.js, app.js (no build step)
   cli.py, __main__.py  command line
 tests/                 conftest (OracleAnalyzer), test_core, test_guidance, test_api,
-                       test_protocol, test_kinds, test_labels_kinds, test_runs, test_tta
+                       test_protocol, test_kinds, test_labels_kinds, test_runs, test_tta,
+                       test_models, test_remote
 scripts/               train_starter, eval_model, nav_trace, gui_check
 models/candidates/     trained models that did not meet the bundling bar (Git LFS, not installed)
 ```
@@ -104,6 +108,9 @@ models/<id>/model.json + member_<k>.pt   (weights of bundled models are in Git L
 models/ACTIVE, models/ACTIVE_<kind>  active model id per scan kind (ACTIVE = PvP)
 virtual_devices/<id>.json            practice device parameters and state
 jobs/<id>.json                       job records
+remote/<trainingjob-id>.zip          training-job files waiting for (or being trained by) a worker
+worker_token                         token a worker must send (X-ChargeCell-Token); made on first use
+tmp/                                 uploads and model-file exports (safe to delete)
 ```
 `scan_ids()` is sorted descending, so the newest id comes first (ids embed a timestamp).
 
@@ -158,7 +165,10 @@ status); `occ_entropy`; `signal_canonical (S,S)`. `tests/conftest.py: truth_to_p
 truth. Keep them in sync.
 
 ### Model card (`models/<id>/model.json`)
-`id, created, config (TrainConfig), architecture (+params), found_threshold, calibrated_on
+`id, created, name (shown in the GUI; default "<kind short> model, <date>"), config (TrainConfig),
+trained_on {computer, device, system, torch, minutes}, added {at, source} (added from a file),
+copied_from (added with an id that was taken), trained_from_job {made_on, created},
+architecture (+params), found_threshold, calibrated_on
 ("real" if ≥ 20 held-out real scans else "synthetic"), split_note, data (synthetic names,
 n_train, n_real_train, n_val), metrics {synthetic|real: status_accuracy, found_precision,
 found_recall, occupancy_pixel_accuracy, confusion, confusion_labels, line_f1, n, ...},
@@ -196,7 +206,8 @@ the first step), `move{gate:ΔV}` (window-centre change, or a barrier change for
 `retune_window` (tiebar FOUND with a coupling outside the target; `move` then holds the
 exchange-gate change), `warnings[]`,
 `spacing_v{gate}`, `spacing_source{gate: "measured in this scan" | "from earlier scans on this
-device" | "device prior" | "unknown"}`.
+device" | "from the device settings" | "unknown"}` (only "measured in this scan" is compared
+in code; the others are shown to the operator).
 
 ## 3. Modules
 
@@ -244,6 +255,46 @@ FOUND calls that also pass the analysis's checks, `analysis.decide.found_gates(k
 families a <-> b, ref order). `TTA = True` is used for calibration and recorded in the card. The line loss weighs line pixels per family
 (`LINE_POS_WEIGHT`: 8 for interdot, spectator, sensor and tie bar, else 4). Progress callback: `(fraction, message,
 record|None)`.
+
+`TrainConfig` also has `name`, `device` (`auto`: CUDA, else MPS, else CPU; `resolve_device`
+gives plain errors for a missing GPU) and `loader_workers` (-1: 0 on CPU, up to 6 on a GPU;
+`_seed_worker` keeps augmentation reproducible). Members train on the device; weights are
+saved as CPU tensors so any computer can load them. `train(..., real=...)` takes real-scan arrays
+directly (from a training-job file) instead of reading labels from the workspace.
+
+### modelstore.py (model versions and model files)
+`summary(ws, card)` adds `kind, display_name, in_use, quality{lines[], precision, recall, n,
+source}, trained_on, size_mb, networks, image_size` for the GUI and CLI (`quality` prefers
+held-out real metrics). `find` by id, id suffix or name; `use` (checks the weights are real
+files, not Git LFS pointers), `rename`, `delete` (refuses the model in use). A **model file** is
+the model folder zipped with `manifest.json` (`FORMAT = "chargecell-model/1"`, digest of the
+weights). `export(ws, id, dest)` (dest: file, folder, or a path ending in `/`); `add(ws, src,
+use_it, name, source)` takes a zip or a folder, rejects unsafe paths and bad weights
+(`check_folder` loads every member), returns the existing id when the same weights are already
+there, gives a new id (with `copied_from`) when the id is taken by a different model, and puts
+the model in use when asked or when it is the first of its kind. `ModelFileError` carries a
+message for the operator.
+
+### remote.py and worker.py (training on another computer)
+A **training-job file** (`FORMAT = "chargecell-training-job/1"`) is a zip: `job.json` (config,
+made_on, n_real, n_synthetic), `synthetic/<name>/*` (the chosen sets, stored uncompressed),
+`real.npz` + `real_meta.json` (labelled scans already turned into arrays by `real_arrays`).
+`check_config(ws, cfg)` gives plain errors (no data, unknown set, size or kind mismatch).
+`make_job_file`, `read_job`, `run_job_file(path, out, device, progress)` (unpacks into a
+temporary workspace, trains, returns a model file). `worker.run_worker(server, device, once,
+poll, log)`: `hello`, then `claim` in a loop; downloads the job file, trains, posts progress
+(epoch records, else at most every 3 s; a reply `{cancel: true}` stops it), uploads the model
+(raw zip body) or posts `failed`. `worker.Server` uses only urllib and bypasses proxies for
+local and private addresses; errors become `WorkerError` with a plain message.
+
+### jobs.py
+One worker thread runs local jobs (states queued -> running -> done | failed | cancelled).
+`submit_remote(kind, title, prepare, **extra)`: `prepare` writes the job file on the worker
+thread (state preparing), then the job waits (`waiting`) until `claim(worker)` hands it to a
+worker (`running`); `remote_progress` (returns the cancel flag; saves on each epoch record, else
+at most every 5 s), `remote_done`, `remote_failed(cancelled=)`. `cancel` ends a waiting remote job
+at once. Remote jobs that are waiting or running survive a restart; other active jobs become
+`interrupted`.
 
 ### model/infer.py
 `Grid` (index <-> volts, including holes). `canonical_signal` resamples and orients.
@@ -368,12 +419,19 @@ sensor must see the interdot step), drawn from a separate random stream.
 | GET | `/api/v1/runs/{id}?format=json|text&download=` | a run's graded tree (depth-first) |
 | POST | `/api/v1/runs/{id}/events`, `/api/v1/runs/{id}/close` | record an action or note / close a run |
 | GET | `/api/v1/run_stats?device=&source=` | statistics across runs |
-| POST | `/api/analyze_all?only_new=true` | job |
+| POST | `/api/analyze_all?only_new=true&kind=` | job (`only_new=false&kind=K` re-analyses one kind after switching models; kinds without a model are skipped) |
 | GET / PUT | `/api/devices`, `/api/devices/{name}` | device configs (validated by pydantic) |
 | GET/POST | `/api/synthetic` | list / generate (job; body includes `kind`) |
 | GET/DELETE | `/api/synthetic/{name}/preview?n=&offset=`, `/api/synthetic/{name}` | thumbnails / delete |
-| GET | `/api/models` | model cards (+kind, +active flag per kind) |
-| POST | `/api/models/{id}/activate`, `/api/train` | activate (for its kind) / train (job; body = TrainConfig fields incl. `kind`; datasets must match kind and size) |
+| GET | `/api/models` | `modelstore.summary` of every model |
+| POST | `/api/models/{id}/activate` | use it for its kind; returns `{active, kind, name, scans_from_other_models}` |
+| PATCH/DELETE | `/api/models/{id}` | rename (`name`, `notes`) / delete (409 for the model in use) |
+| GET | `/api/models/{id}/download` | model file (zip) |
+| POST | `/api/models/add` | multipart `files[]` (one zip, or a folder's model.json + member_*.pt), `use`, `name` |
+| POST | `/api/train` | TrainConfig fields (incl. `kind`, `name`) + `use_when_done`, `where` (`here` \| `elsewhere`); checked by `remote.check_config` |
+| GET | `/api/worker/setup` | what the Train page shows: token, host, port, reachable, urls, computer, version |
+| GET/POST | `/api/worker/hello`, `/claim` (204 if none), `/jobs/{id}/job-file`, `/jobs/{id}/progress` (-> `{cancel}`), `/jobs/{id}/model` (raw zip), `/jobs/{id}/failed` | the worker protocol; every call needs header `X-ChargeCell-Token` (401 otherwise) |
+| GET/POST | `/api/jobs/{id}/job-file`, `/api/jobs/{id}/retry` | the training-job file for the manual route / offer a failed remote job again |
 | GET/POST | `/api/jobs`, `/api/jobs/{id}`, `/api/jobs/{id}/cancel` | job status / cancel |
 | GET/POST | `/api/virtual`, `/api/virtual/{vd}/measure` | practice devices (create takes the first scan of body `kind`; measure takes `kind`) |
 | POST | `/api/scans/{id}/run_next?window=next_window|tiebar_window|retune_window` | practice mode: apply gate changes and fixes (`virtual.apply_advice`, logged in the run), measure the recommended window (as a tiebar scan for the last two), analyse and record |
@@ -397,10 +455,21 @@ numerals.
   handling reversed axes. `hooks: down/drag/up/hover/dblclick/context` are for editing tools.
 - `app.js`: helpers (`h()` element builder, `api()` fetch wrapper with error toasts),
   `scanPicker`, `plotBar`, overlay builders (`codeImage`, `codeLabels`, `linesImage`,
-  `dashedRect`, `arrow`), and `pages.{review,label,scans,runs,synthetic,train,device}`, each with
-  `build()` (once) and `enter(arg)` (on every route). Routing is by hash `#/<page>/<scanId>`.
-  `pollStatus` runs every 1.5 s (job indicator, model indicator, refresh on job completion).
-  `S.pendingDraft` makes "Correct in labeller" open the Label page with a model draft loaded.
+  `dashedRect`, `arrow`), and `pages.{home,models,review,label,scans,runs,synthetic,train,
+  device}`, each with `build()` (once) and `enter(arg)` (on every route). Routing is by hash
+  `#/<page>/<arg>` (default `home`; `#/scans/import` opens the import panel, `#/train/<kind>`
+  picks a kind). The rail shows the pages as Home, Scans, Review, Label, History (`runs`),
+  Models, Train, Simulated scans (`synthetic`), Device settings (`device`).
+  `pollStatus` runs every 1.5 s (job indicator with `jobText`, the "Models in use" list linking
+  to the Models page, refresh on job completion). `S.models` / `loadModels()` cache
+  `/api/models`; `inUse(kind)`, `modelName(id)`. `KINDS` holds each kind's plain name, goal and
+  goal noun (as `kinds.py`). Home: task cards, getting-started checklist, models in use.
+  Models: per kind the model in use and other versions (`card`, `results`), add from a zip or a
+  folder (`webkitdirectory`), and after switching a banner offering to re-analyse that kind.
+  Train: four steps (kind, data with image size taken from the chosen sets, where to train with
+  the worker commands from `/api/worker/setup`, name), a progress panel for local and remote
+  jobs (download job file, cancel, retry, use the new model) and earlier trainings.
+  `S.pendingDraft` makes "Correct it" open the Label page with a model draft loaded.
   The annotator name is kept in localStorage (`cc-annotator`). Scan kinds: `KIND_LABEL`,
   `statusLabel(kind, status)`; `drawFeatures` draws PvT/tie-bar keypoints (points are gate -> V,
   polylines are on the analysis axes and swapped when a PvT analysis was transposed); `onAxes`
@@ -444,5 +513,11 @@ numerals.
   actions, statistics, a wrong FOUND failing its stage; the GUI practice loop and labels.
 - `test_tta.py`: the feature symmetries behind test-time augmentation, and the mapping of
   axis-swapped outputs back to dot A and B (with a network that is equivariant by construction).
+- `test_models.py`: model files between workspaces (zip and folder, same model twice, id
+  collisions, names), bad files (not a zip, unsafe paths, Git LFS pointers, wrong weights), the
+  model endpoints (switch, rename, delete guard, download, add).
+- `test_remote.py`: a training-job file round trip with a labelled scan; a GUI job trained by
+  `run_worker` over the test client (progress, model back and in use, job file removed);
+  cancelling during training, a waiting job surviving a restart, failure and retry.
 - Guidance benchmarks outside pytest: `scripts/nav_trace.py --oracle --bench --kind PvP|PvT|tiebar
   [--no-prior] [-v]` (30 devices).

@@ -17,6 +17,6 @@ details and the reasons they fall short are in `docs/HANDOFF.md` section 3. The 
 models never gave a wrong FOUND in any closed loop at this threshold; they are conservative, not
 wrong.
 
-To try one, copy its folder into your workspace's `models/` folder (default
-`~/chargecell-workspace/models/`), restart `chargecell serve`, and make it active on the Train
-page. To recalibrate it on your own held-out data: `chargecell calibrate --model <id> ...`.
+To try one, add its folder on the Models page (**Add a model file**, then choose the folder), or
+run `chargecell models add models/candidates/<folder> --use`. To recalibrate it on your own
+held-out data: `chargecell calibrate --model <id> ...`.

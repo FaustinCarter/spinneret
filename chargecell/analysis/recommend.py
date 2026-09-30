@@ -163,7 +163,8 @@ def unchecked_limits_warning(gates: list[str], cfg: DeviceConfig) -> str | None:
     if not missing:
         return None
     return (f"No safe limits are set for {', '.join(missing)} on device '{cfg.name}', so the "
-            "suggested window was not checked against them. Set them on the Device page.")
+            "suggested window was not checked against them. Set them on the Device settings "
+            "page.")
 
 
 def _clip_to_limits(rng: list, gate: str, cfg: DeviceConfig, warnings: list) -> list:
@@ -218,12 +219,12 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
         if s_idx:
             warnings.append(f"The line spacing measured along {gate} ({fmt_mag(s_idx * d)}) is "
                             "far from the device's typical value, so it was not used. Check the "
-                            "Device page if the typical value is out of date.")
+                            "Device settings page if the typical value is out of date.")
         h = history_spacing(history, gate)
         if h and plausible(h, gate):
             return h, "from earlier scans on this device"
         if cfg.spacing(gate):
-            return cfg.spacing(gate), "device prior"
+            return cfg.spacing(gate), "from the device settings"
         return None, "unknown"
 
     sa_v, sa_src = spacing("a", xg, dxv)
@@ -237,7 +238,8 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
     if status == schema.FOUND:
         cell = decision["cell"]
         cx, cy = cell["centroid_v"][xg], cell["centroid_v"][yg]
-        rec.update(kind="found", confidence="high", basis="(1,1) cell visible and anchored",
+        rec.update(kind="found", confidence="high",
+                   basis="the (1,1) cell is in view, and electrons are counted from an empty region",
                    target={xg: cx, yg: cy})
         rec["headline"] = f"(1,1) found. Cell centre: {xg} = {_v(cx)}, {yg} = {_v(cy)}."
         steps.append(f"Use the cell centre ({xg} = {_v(cx)}, {yg} = {_v(cy)}) as the (1,1) "
@@ -255,9 +257,10 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
                          "centre of that window first: the tie bar is a small signal.")
         for sp in decision.get("spectators", []):
             if sp["status"] != "verified":
-                steps.append(f"Spectator {sp['gate']} is {sp['status']}: this scan cannot show "
-                             "its electron number. Confirm with a scan that sweeps "
-                             f"{sp['gate']} before relying on (1,1,1).")
+                steps.append(f"The neighbouring dot under {sp['gate']} (a spectator) is not "
+                             "checked yet: this scan cannot show how many electrons it holds. "
+                             f"Before relying on one electron in each dot (1,1,1), confirm it with "
+                             f"a scan that sweeps {sp['gate']}.")
         return rec
 
     # ------------------------------------------------------------------ UNINTERPRETABLE
@@ -271,33 +274,32 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
             rec["headline"] = "Too noisy to read. Improve the signal, then rescan the same window."
             steps += [f"Check the sensor ({M}) sits on the steepest flank of its Coulomb peak; "
                       "retune it if it has drifted.",
-                      "Average longer: noise falls as 1/sqrt(time), so 4x the integration time "
-                      "halves it."]
+                      "Average longer: 4 times the time per point halves the noise."]
         elif reason == "sensor_insensitive":
             rec["headline"] = ("The charge sensor has lost sensitivity. Retune it, then rescan "
                                "the same window.")
             steps += [f"Sweep {M} across its Coulomb peak and park it on the steepest flank.",
-                      f"If your setup supports it, compensate the plunger sweep on {M} so the "
-                      "sensor stays on the flank.",
+                      f"If your setup can do it, change {M} a little along with the plungers "
+                      "during the scan (sensor compensation), so the sensor stays on the flank.",
                       "If the window spans many electrons, the sensor drifts as the dots fill; "
                       "a smaller window keeps it on the flank."]
         elif reason == "dots_merged":
             X = cfg.barrier_between(xg, yg)
             step = cfg.barrier_step_for(sa_v or sb_v, x_rng[1] - x_rng[0])
-            knob = f"{X}" if X else "the barrier gate between the two dots"
+            knob = f"{X}" if X else "the exchange gate between the two dots"
             rec["headline"] = ("The two dots behave like one. Reduce their coupling, then "
                                "rescan the same window.")
-            steps.append(f"Lower {knob} by {fmt_mag(step)} to raise the interdot barrier "
-                         "(for an accumulation-mode exchange gate, lower voltage means weaker "
-                         "coupling). Repeat in small steps until separate lines appear.")
+            steps.append(f"Lower {knob} by {fmt_mag(step)}: this raises the barrier between the "
+                         "two dots (a lower exchange-gate voltage means weaker coupling on these "
+                         "devices). Repeat in small steps until separate lines appear.")
             if X:
                 rec["move"] = {X: -step}
         elif reason == "charge_instability":
             rec["headline"] = "The pattern jumps between sweeps. Let the device settle and rescan."
-            steps += ["Rescan the same window. Charge switching often relaxes some minutes after "
-                      "a large voltage move.",
-                      "If it persists: sweep more slowly, avoid large steps, and check for a "
-                      "noisy gate line."]
+            steps += ["Rescan the same window. Charges often settle a few minutes after a large "
+                      "voltage change.",
+                      "If it keeps happening: sweep more slowly, avoid large voltage steps, and "
+                      "check the gate wiring for noise."]
         elif reason == "resolution_too_coarse":
             s_x = sa_v or cfg.spacing(xg)
             s_y = sb_v or cfg.spacing(yg)
@@ -312,7 +314,7 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
             steps.append(f"Aim for about {cfg.points_per_addition} points per electron "
                          f"(currently {nx_cur} x {ny_cur}).")
         else:
-            rec["headline"] = "The scan cannot be interpreted. Check the setup and rescan."
+            rec["headline"] = "This scan cannot be read. Check the setup and rescan."
         if quality.get("warnings"):
             steps += quality["warnings"]
         seen = revisited_window(history, xg, yg, x_rng, y_rng, recent=3,
@@ -326,9 +328,9 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
             y_rng = _clip_to_limits([cy - hy, cy + hy], yg, cfg, warnings)
             nx, ny = int(min(cfg.max_points, round(1.5 * nx))), int(min(cfg.max_points, round(1.5 * ny)))
             rec["confidence"] = "low"
-            warnings.append(f"This window could not be interpreted before either (scan {seen}). "
-                            "If the fix did not help, check the sensor and wiring; the next "
-                            "window is 1.5x wider in case the problem is local.")
+            warnings.append(f"This window could not be read last time either (scan {seen}). "
+                            "If the fix did not help, check the sensor and the wiring. The next "
+                            "window is 1.5 times wider, in case the problem is in one spot only.")
             if (w_lim := unchecked_limits_warning([xg, yg], cfg)):
                 warnings.append(w_lim)
         rec["next_window"] = {"x_gate": xg, "y_gate": yg, "x": [*x_rng, nx], "y": [*y_rng, ny]}
@@ -379,19 +381,21 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
             frac = 0.2 if k0["index"] == 0 else 0.8 if k0["index"] == 1 else 0.95
             new_w = wf * (S - 1)
             shift = (k0["c"] - frac * new_w + new_w / 2) - (S - 1) / 2
-            return shift, wf, ("the first transition is known but the electron spacing is not; "
-                               "the next window keeps it in view and is 1.5x wider")
+            return shift, wf, ("the first charge line is known but not the spacing between "
+                               "electrons, so the next window keeps it in view and is 1.5 times "
+                               "wider")
         if state == "lines_unanchored":
             lowest = min(l["c"] for l in lat["lines"]) if lat and lat["lines"] else None
             if lowest is not None and lowest > 0.5 * (S - 1):
                 # a large line-free region below the lowest transition is probably the empty
                 # region: keep it in view instead of moving away from it
                 return lowest - 0.35 * (S - 1), 1.0, ("keep the line-free region below the "
-                                                      "lowest transition in view (probably empty)")
+                                                      "lowest charge line in view (probably the "
+                                                      "empty region)")
             return -explore_frac * (S - 1), 1.0, "toward fewer electrons (no empty region yet)"
         if reason in ("occupancy_too_low", "no_transitions"):
-            return explore_frac * (S - 1), 1.0, "toward more electrons (no transition yet)"
-        return 0.0, 1.5, "wider range (this dot's transitions are not in view)"
+            return explore_frac * (S - 1), 1.0, "toward more electrons (no charge line yet)"
+        return 0.0, 1.5, "wider range (this dot's charge lines are not in view)"
 
     def indexed_lines_consistent(lat: dict, s_i: float | None) -> bool:
         """Anchored lines must be about one spacing apart. A noisy occupancy map can yield
@@ -412,10 +416,10 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
         if not ok:
             v, src = spacing(fam, gate, d, use_measured=False)
             rec["spacing_v"][gate], rec["spacing_source"][gate] = v, src
-            warnings.append(f"The transitions of the {gate} dot are inconsistent (lines closer "
-                            "together than an electron spacing), so the target uses only the "
-                            f"first transition and a typical spacing ({src}). Check the result "
-                            "after the next scan.")
+            warnings.append(f"The charge lines of the {gate} dot are inconsistent (closer "
+                            "together than one electron spacing), so the target uses only the "
+                            f"first line and a typical spacing ({src}). Check the result after "
+                            "the next scan.")
     sa_v, sa_src = rec["spacing_v"][xg], rec["spacing_source"][xg]
     sb_v, sb_src = rec["spacing_v"][yg], rec["spacing_source"][yg]
     sa_i = sa_v / dxv if sa_v else None
@@ -432,15 +436,15 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
         i_t = (A + ma * (B - mb * ic - jc)) / (1 - ma * mb)
         j_t = B + mb * (i_t - ic)
         if ok_a and ok_b:
-            confidence, basis = "high", "lattice fitted to anchored transitions"
+            confidence, basis = "high", "the charge lines in this scan, counted from an empty region"
         else:
             confidence = "medium"
-            basis = "first anchored transitions and the typical electron spacing"
+            basis = "the first counted charge lines and the usual spacing between electrons"
         wf_a = wf_b = 1.0
     else:
         counted = st_a == "anchored" or st_b == "anchored"
         confidence = "medium" if (ta or tb or counted) else "low"
-        basis = "exploration"
+        basis = "a search: no charge lines could be counted yet"
         wf_a = wf_b = 1.0
         if tb:
             j_t = tb[0]
@@ -502,7 +506,7 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
         # so more of the empty region and the neighbouring cells are in view
         x_rng, y_rng = widened(x_rng, y_rng, 1.5)
         warnings.append("Rescanning this window would show the same thing, so the next window "
-                        "is 1.5x wider around the expected (1,1) cell.")
+                        "is 1.5 times wider around the expected (1,1) cell.")
     cx_old, cy_old = float(np.mean(scan.x[[0, -1]])), float(np.mean(scan.y[[0, -1]]))
     cx_new, cy_new = float(np.mean(x_rng)), float(np.mean(y_rng))
 
@@ -515,8 +519,8 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
     if f < 1.0:
         limit = (f"the {fmt_mag(cfg.max_step)} step limit" if cfg.max_step else
                  "one window width (no step limit is set for this device)")
-        warnings.append(f"The full move ({xg} {_mv(mx)}, {yg} {_mv(my)}) exceeds {limit}. "
-                        "Take the first step shown, rescan, and let ChargeCell re-evaluate.")
+        warnings.append(f"The full move ({xg} {_mv(mx)}, {yg} {_mv(my)}) is larger than {limit}. "
+                        "Take the first step shown, rescan, and let ChargeCell look again.")
         mx, my = mx * f, my * f
         hx, hy = (x_rng[1] - x_rng[0]) / 2, (y_rng[1] - y_rng[0]) / 2
         x_rng = [cx_old + mx - hx, cx_old + mx + hx]
@@ -540,7 +544,7 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
     parts = [f"{verb(d)} {g} by {fmt_mag(d)}" for g, d in ((xg, mx), (yg, my))
              if abs(d) >= 0.5 * min(dxv, dyv)]
     action = " and ".join(parts) if parts else "keep the centre"
-    zoom_out = ("Take a 1.5x wider window " + (f"and {action}" if parts else
+    zoom_out = ("Take a window 1.5 times wider " + (f"and {action}" if parts else
                                                 "around the same centre")) if wider else None
     if decision.get("held_back"):
         rec["headline"] = ("(1,1) may be in this window, but the electron count is not certain "
@@ -553,10 +557,10 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
     else:
         rec["headline"] = ({"high": "(1,1) is outside this window. ",
                             "medium": "(1,1) is probably ",
-                            "low": "Not enough in view to locate (1,1). "}[confidence]
+                            "low": "Not enough in view to find (1,1). "}[confidence]
                            + ({"high": f"To centre it, {action}.",
                                "medium": f"reachable if you {action}.",
-                               "low": f"Explore: {action}."}[confidence]))
+                               "low": f"Try this: {action}."}[confidence]))
     sx, sy = x_rng[1] - x_rng[0], y_rng[1] - y_rng[0]
     # a move of more than one electron spacing changes the electron numbers, which shifts the
     # sensor along its Coulomb peak: the far dot's lines fade first, and a missed faint line
@@ -573,7 +577,7 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
         steps.append("Why: " + "; ".join(notes) + ".")
     if reason == "no_transitions":
         steps.insert(0, f"First confirm the sensor works: sweep {cfg.sensor_gate} and check you "
-                        "see Coulomb peaks. A flat scan can also mean a dead sensor.")
+                        "see Coulomb peaks. A flat scan can also mean the sensor is not working.")
     if cfg.virtual_gates and cfg.virtual_gates.matrix and xg in cfg.virtual_gates.virtual:
         rec["physical_moves"] = cfg.virtual_gates.to_physical({xg: mx, yg: my})
         steps.append("Physical gate changes (from the virtual-gate matrix): " + ", ".join(
@@ -599,9 +603,9 @@ def finalize_window(scan: Scan, cfg: DeviceConfig, x_rng: list, y_rng: list,
     if f < 1.0:
         limit = (f"the {fmt_mag(cfg.max_step)} step limit" if cfg.max_step else
                  "one window width (no step limit is set for this device)")
-        warnings.append(f"The full move to {what} ({xg} {_mv(mx)}, {yg} {_mv(my)}) exceeds "
-                        f"{limit}. Take the first step shown, rescan, and let ChargeCell "
-                        "re-evaluate.")
+        warnings.append(f"The full move to {what} ({xg} {_mv(mx)}, {yg} {_mv(my)}) is larger "
+                        f"than {limit}. Take the first step shown, rescan, and let ChargeCell "
+                        "look again.")
         hx, hy = (x_rng[1] - x_rng[0]) / 2, (y_rng[1] - y_rng[0]) / 2
         x_rng = [cx_old + mx * f - hx, cx_old + mx * f + hx]
         y_rng = [cy_old + my * f - hy, cy_old + my * f + hy]
@@ -634,20 +638,19 @@ def common_fix(reason: str, cfg: DeviceConfig) -> tuple[str, list[str]] | None:
         return ("Too noisy to read. Improve the signal, then rescan the same window.",
                 [f"Check the sensor ({M}) sits on the steepest flank of its Coulomb peak; "
                  "retune it if it has drifted.",
-                 "Average longer: noise falls as 1/sqrt(time), so 4x the integration time "
-                 "halves it."])
+                 "Average longer: 4 times the time per point halves the noise."])
     if reason == "sensor_insensitive":
         return ("The charge sensor has lost sensitivity. Retune it, then rescan the same "
                 "window.",
                 [f"Sweep {M} across its Coulomb peak and park it on the steepest flank.",
-                 f"If your setup supports it, compensate the sweep on {M} so the sensor stays "
-                 "on the flank."])
+                 f"If your setup can do it, change {M} a little along with the swept gates "
+                 "(sensor compensation), so the sensor stays on the flank."])
     if reason == "charge_instability":
         return ("The pattern jumps between sweeps. Let the device settle and rescan.",
-                ["Rescan the same window. Charge switching often relaxes some minutes after a "
-                 "large voltage move.",
-                 "If it persists: sweep more slowly, avoid large steps, and check for a noisy "
-                 "gate line."])
+                ["Rescan the same window. Charges often settle a few minutes after a large "
+                 "voltage change.",
+                 "If it keeps happening: sweep more slowly, avoid large voltage steps, and check "
+                 "the gate wiring for noise."])
     return None
 
 
@@ -670,15 +673,16 @@ def confirm_rescan(scan: Scan, cfg: DeviceConfig, history, rec: dict, seen: str,
     f = CONFIRM_AVERAGING
     rec.update(kind="confirm", confidence="medium", target=target, move={xg: 0.0, yg: 0.0},
                averaging=f, retune_sensor=True,
-               basis="every check passed except the confidence threshold",
+               basis="every check passed, but the model was not sure enough",
                next_window={"x_gate": xg, "y_gate": yg, "x": [*x_rng, nx], "y": [*y_rng, ny]})
     rec["headline"] = (f"{seen} to be in this window, but the model is not sure enough to call "
-                       f"it found. Rescan the same window with {f:g}x longer averaging to "
+                       f"it found. Rescan the same window, averaging {f:g} times longer, to "
                        "confirm.")
     rec["steps"] += [
         f"Check the sensor ({cfg.sensor_gate}) sits on the steepest flank of its Coulomb peak "
         "at the centre of this window; retune it if it has drifted.",
-        f"Average {f:g}x longer per point: noise falls as 1/sqrt(time), so this halves it.",
+        f"Average {f:g} times longer per point: this "
+        + ("halves the noise." if f == 4 else f"divides the noise by {f ** 0.5:.2g}."),
         window_step(scan, x_rng, y_rng, nx, ny).replace("Next scan:", "Next scan (same window):"),
         "If the rescan is still not conclusive, ChargeCell will suggest a wider window."]
     return True
@@ -697,6 +701,6 @@ def widen_if_revisited(history, scan: Scan, x_rng: list, y_rng: list, warnings: 
     y_u = [min(y_rng[0], float(scan.y[0])), max(y_rng[1], float(scan.y[-1]))]
     if same_as_scan(scan, x_u, y_u):               # covering both is this window again
         warnings[-1] = (f"The suggested window was already scanned (scan {seen}) without "
-                        f"reaching {what}, so the next window is 1.5x wider.")
+                        f"reaching {what}, so the next window is 1.5 times wider.")
         return widened(x_u, y_u, 1.5)
     return x_u, y_u

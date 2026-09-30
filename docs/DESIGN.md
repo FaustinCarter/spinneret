@@ -323,7 +323,37 @@ what the backend or operator reports (the protocol's run events).
   can be read node by node. Re-analysing a scan with the same model and the same result adds
   nothing to the tree.
 
-## 13. Limitations and next steps
+## 13. Model versions and training elsewhere (`modelstore.py`, `remote.py`, `worker.py`)
+
+The user asked for three things here: switching models must be easy, training must be easy on a
+GPU that may not be on the computer running the web page, and the interface must be plain.
+
+- **Model versions.** One model per scan kind is in use (`models/ACTIVE_<kind>`); switching
+  changes one file and clears the analyzer cache, so it takes effect at the next analysis. Each
+  model has a name and a plain-language summary of its test results (`modelstore.quality`).
+  Scans analysed by another model keep their answer; the GUI offers to analyse that kind again.
+- **Model files.** A model moves between computers as one zip (the model folder plus a manifest
+  with a digest of the weights). Adding checks every file before anything is copied: unsafe
+  paths, Git LFS pointers instead of weights, weights that do not load into the network the card
+  describes. The same weights added twice are recognised; a different model with a taken id gets
+  a new id.
+- **Training elsewhere.** A training-job file holds everything a training needs (settings,
+  the chosen simulated scan sets, the labelled scans already turned into training arrays), so
+  the training computer needs ChargeCell but no copy of the workspace. The GUI computer never
+  connects to the training computer: a worker (`chargecell worker`) on the training computer
+  asks for work, downloads the job file, trains, reports progress, and uploads the model. This
+  pull design works behind firewalls and through an SSH tunnel, needs no open port on the
+  training computer, and lets any number of training computers share one queue. The worker uses
+  only the standard library for HTTP. Without any network, the same job file is carried over by
+  hand (`chargecell train-job`).
+- **Security.** The web page has no login, so it listens on 127.0.0.1 unless started with
+  `--host`; `serve` warns when it is reachable from other computers. Worker calls need a token
+  (`<workspace>/worker_token`, compared in constant time). The token is shown on the Train page,
+  so anyone who can open the web page can connect a worker: the same trust as the page itself.
+- **Devices.** Training picks a CUDA GPU, else an Apple GPU, else the CPU (`--device` to
+  choose); weights are stored as CPU tensors so a model trained on a GPU loads anywhere.
+
+## 14. Limitations and next steps
 
 - The starter models have only seen simulations. Label real scans from at least two cooldowns and
   retrain before trusting them on a new device.

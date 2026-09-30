@@ -18,7 +18,7 @@ Background: `docs/DESIGN.md`, `docs/DECISIONS.md`, `docs/RESEARCH_NOTES.md`. Int
 ```bash
 git lfs install && git lfs pull                 # bundled model weights are in Git LFS
 pip install -e ".[dev]"                          # Python >= 3.10; CPU torch is fine
-pytest -q                                        # 37 tests, ~3 min on 4 cores
+pytest -q                                        # 43 tests, ~2-3 min on 4 cores
 python scripts/nav_trace.py --oracle --bench --kind PvP   # guidance benchmark, expect 30/30
 python scripts/nav_trace.py --oracle --bench --kind PvT   # (also tiebar; add --no-prior)
 chargecell -w /tmp/demo_ws serve --no-browser    # GUI at http://127.0.0.1:8765
@@ -27,6 +27,10 @@ python scripts/gui_check.py --out /tmp/shots     # browser check (needs playwrig
 python scripts/train_starter.py --kind PvP --size 96 --epochs 14 --ensemble 3 -n 8000 --workers 4 --bundle
 python scripts/eval_model.py --model-dir <ws>/models/<id>   # any kind; held-out + closed loop
 chargecell -w <ws> runs [run_id] [--stats]       # automation tree: runs, one run's graded tree
+chargecell -w <ws> models [use|add|export|rename|delete] ...  # model versions and model files
+chargecell -w <ws> train ... --job-file job.zip  # pack a training for another computer
+chargecell train-job job.zip --device cuda       # ... and run it there (writes a model file)
+chargecell worker --server http://<gui>:8765 --token <token>  # train Train-page jobs here
 ```
 
 ## Rules for this codebase
@@ -53,8 +57,14 @@ chargecell -w <ws> runs [run_id] [--stats]       # automation tree: runs, one ru
 - **Front end:** plain JS, no build step, must work offline. `plot.js` stays wrapped in an IIFE.
   Keep the design tokens in `style.css`. After UI changes, run `scripts/gui_check.py` and look
   at the screenshots.
-- **Operator-facing text** (GUI, OPERATOR_GUIDE, guidance headlines/steps) is plain language
-  with concrete numbers: which knob, which direction, how far.
+- **Operator-facing text** (GUI, OPERATOR_GUIDE, guidance headlines/steps, CLI help) is plain
+  technical English with concrete numbers: which knob, which direction, how far. No
+  machine-learning or software jargon on screen (DECISIONS 35); physics terms that cannot be
+  avoided go in the README glossary. Keep the glossary in step when adding such a term.
+- **Models and remote training:** switching and model files go through `modelstore.py`;
+  training elsewhere through `remote.py` (job files) and `worker.py`. Model and job-file formats
+  are versioned (`chargecell-model/1`, `chargecell-training-job/1`): change them additively.
+  Never loosen the worker token check or make `serve` listen beyond 127.0.0.1 by default.
 - **No instrument code.** spinQICK was removed at the user's request. Measurement backends
   talk to ChargeCell only through the chargecell/1 protocol (`protocol.py`, `docs/PROTOCOL.md`).
   ChargeCell stays advisory and never moves gates. Change the protocol additively (new optional

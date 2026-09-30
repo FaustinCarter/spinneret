@@ -34,7 +34,7 @@ from .recommend import (common_fix, confirm_rescan, describe_move, finalize_wind
 
 SPEC = kinds.TIEBAR
 UNCONFIRMED_TEXT = ("The tie bar and both triple points appear to be in the window and every "
-                    "check passed, but the model's confidence is below its calibrated threshold.")
+                    "check passed, but the model is not sure enough to call it found.")
 R11, R20, R10, R21, OTHER = range(5)
 K_B = 8.617333e-5          # eV / K
 STRONG_RATIO = 0.45        # warn: close to the ratio where the triple points merge
@@ -172,7 +172,8 @@ def analyze_tiebar(ws: Workspace, scan: Scan, model_id: str | None = None,
     checks, gate_fails = [], []
     if status == schema.FOUND:
         if sp[0] < tau:
-            checks.append(f"confidence {sp[0]:.2f} is below the calibrated threshold {tau:.2f}")
+            checks.append(f"the model is {100 * sp[0]:.3g}% sure, and it needs to be "
+                          f"{100 * tau:.3g}% sure to say found")
         gate_fails = _gate_checks(geo)
         checks += gate_fails
         if checks:
@@ -303,18 +304,19 @@ def recommend_tiebar(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: s
         kp, cp = res["keypoints"], res["coupling"]
         ro = kp["readout"]
         rec.update(kind="found", confidence="high", target=ro,
-                   basis="both triple points and the tie bar traced")
+                   basis="both triple points and the tie bar are traced")
         ratio = cp.get("coupling_ratio")
-        rtxt = (f"Coupling ratio {ratio:.2f} (interdot width {fmt_mag(cp['interdot_width_V'])})."
+        rtxt = (f"Coupling ratio {ratio:.2f} (width of the interdot line "
+                f"{fmt_mag(cp['interdot_width_V'])}, divided by the tie-bar length)."
                 if ratio is not None else "The coupling could not be measured.")
         rec["headline"] = (f"Tie bar found. First readout guess: {xg} = {fmt_v(ro[xg], wx)}, "
                            f"{yg} = {fmt_v(ro[yg], wy)}. {rtxt}")
         steps.append(f"Triple points: {xg} = {fmt_v(kp['tp_low'][xg], wx)}, {yg} = "
                      f"{fmt_v(kp['tp_low'][yg], wy)} and {xg} = {fmt_v(kp['tp_high'][xg], wx)}, "
                      f"{yg} = {fmt_v(kp['tp_high'][yg], wy)}.")
-        steps.append("Use the readout point as the starting spin-to-charge measurement point "
-                     "(on the (2,0) side, just past the transition), then refine it with a "
-                     "readout calibration.")
+        steps.append("Use the readout point as the first guess for spin readout (it sits on "
+                     "the (2,0) side, just past the line), then fine-tune it with a readout "
+                     "calibration.")
         if cp.get("tunnel_coupling_ueV") is not None:
             steps.append(f"Estimated tunnel coupling: {cp['tunnel_coupling_ueV']:.0f} µeV "
                          f"({cp['tunnel_coupling_GHz']:.1f} GHz)"
@@ -325,16 +327,16 @@ def recommend_tiebar(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: s
         if a in ("weak", "strong"):
             sign = 1.0 if a == "weak" else -1.0
             verb = "Raise" if a == "weak" else "Lower"
-            steps.append(f"The coupling is {a}er than the target: {verb.lower()} {knob} by "
-                         f"{fmt_mag(step)} and rescan this window.")
+            steps.append(f"The coupling between the dots is {a}er than your target: "
+                         f"{verb.lower()} {knob} by {fmt_mag(step)} and rescan this window.")
             if X:
                 rec["retune_window"] = {"x_gate": xg, "y_gate": yg, "x": [*x_rng, nx_cur],
                                         "y": [*y_rng, ny_cur]}
                 rec["move"] = {X: sign * step}
             rec["headline"] += f" {verb} {knob} to tune the coupling."
         elif a == "strong" and not cfg.tiebar_coupling_target:
-            warnings.append("The coupling is strong: the triple points are close to merging. "
-                            f"Consider lowering {knob}.")
+            warnings.append("The coupling between the dots is strong: the triple points are "
+                            f"close to merging. Consider lowering {knob}.")
         return rec
 
     if status == schema.UNINTERPRETABLE:
@@ -347,8 +349,8 @@ def recommend_tiebar(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: s
         elif reason == "dots_merged":
             rec["headline"] = ("The two dots are too strongly coupled for a tie bar. Weaken "
                                "their coupling, then rescan.")
-            steps.append(f"Lower {knob} by {fmt_mag(step)} (for an accumulation-mode exchange "
-                         "gate, lower voltage means weaker coupling). Repeat in small steps.")
+            steps.append(f"Lower {knob} by {fmt_mag(step)} (a lower exchange-gate voltage means "
+                         "weaker coupling on these devices). Repeat in small steps.")
             if X:
                 rec["move"] = {X: -step}
         elif reason == "resolution_too_coarse":
@@ -356,7 +358,7 @@ def recommend_tiebar(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: s
             ny = int(min(cfg.max_points, max(2 * ny_cur, cfg.min_points)))
             rec["headline"] = f"Too few points across the tie bar. Rescan with {nx} x {ny} points."
         else:
-            rec["headline"] = "The scan cannot be interpreted. Check the setup and rescan."
+            rec["headline"] = "This scan cannot be read. Check the setup and rescan."
         steps += quality.get("warnings", [])
         rec["next_window"] = {"x_gate": xg, "y_gate": yg, "x": [*x_rng, nx], "y": [*y_rng, ny]}
         steps.append("Rescan the same window after the fix.")
@@ -397,7 +399,8 @@ def recommend_tiebar(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: s
             cx, cy = np.mean(x_rng), np.mean(y_rng)
             new_x, new_y = [cx - wx, cx + wx], [cy - wy, cy + wy]
             confidence = "low"
-            basis = "no tie bar in view and no earlier (1,1) scan of this pair: zoom out 2x"
+            basis = ("no tie bar in view and no earlier (1,1) scan of this pair: a window "
+                     "twice as wide")
     new_x, new_y = widen_if_revisited(history, scan, new_x, new_y, warnings, "the tie bar")
     win = finalize_window(scan, cfg, new_x, new_y, warnings, "the tie bar")
     nx, ny = nx_cur, ny_cur
@@ -405,16 +408,16 @@ def recommend_tiebar(scan: Scan, grid: Grid | None, cfg: DeviceConfig, status: s
                basis=basis, target=win["target"], move=win["move"],
                next_window={"x_gate": xg, "y_gate": yg, "x": [*win["x"], nx], "y": [*win["y"], ny]})
     rec["headline"] = ({"partially_visible": "The tie bar runs off the window. ",
-                        "no_tiebar": "The (1,1)-(2,0) transition is not in this window. "}
+                        "no_tiebar": "The (1,1)-(2,0) line is not in this window. "}
                        .get(reason, "") + f"Next: {describe_move(win['move'], scan)}.")
     if held_back_by == "confidence":          # confirmed once already; both triple points seen
         rec["headline"] = ("The tie bar appears to be in view, but the model is still not sure "
-                           f"enough. Next: {describe_move(win['move'], scan)}, with a 1.5x wider "
-                           "window around it.")
+                           f"enough. Next: {describe_move(win['move'], scan)}, with a window "
+                           "1.5 times wider around it.")
     steps.append(window_step(scan, win["x"], win["y"], nx, ny))
     steps.append(f"Why: {basis}.")
     if reason == "no_tiebar" and confidence == "low":
-        steps.append("If it still does not show, go back to a plunger-plunger scan to find (1,1) "
+        steps.append("If it still does not show, go back to a plunger vs plunger scan to find (1,1) "
                      "first; ChargeCell then suggests the tie-bar window itself.")
     return rec
 
