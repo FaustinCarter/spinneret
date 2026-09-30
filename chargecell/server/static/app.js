@@ -454,7 +454,7 @@ pages.review = {
           (r.probabilities.ref || []).length === 1 ? `Empty dot visible: ${pct(r.probabilities.ref[0])}. ` : "",
         `Ensemble disagreement ${r.uncertainty.mutual_info}. FOUND threshold ${r.found_threshold}. Model ${shortId(r.model_id)}.`),
       r.quality && r.quality.warnings.length ? h("p", { class: "warn small" }, r.quality.warnings.join(" ")) : null) : null;
-    side.replaceChildren(decision, todo, specs, teach, probs, info);
+    side.replaceChildren(...[decision, todo, specs, teach, probs, info].filter(Boolean));
   },
 
   async runNext(e, key = "next_window") {

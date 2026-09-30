@@ -8,7 +8,8 @@ Does: creates two practice devices if the workspace has no scans; analyses one (
 active) so the Review page shows overlays; screenshots every page; for each scan kind with an
 active model, creates a practice device, analyses it, follows the advice once on the practice
 device and screenshots the Review page (review_<kind>_1.png, _2.png) and the Runs page with the
-automation tree they recorded (runs.png); draws an A and a B boundary
+automation tree they recorded (runs.png) and the labeller with a model draft for each kind
+(label_<kind>.png); draws an A and a B boundary
 in the labeller with real mouse input, sets counts and outcome, saves, and checks the saved
 annotation through the API. Prints browser console errors (an expected 404 is filtered out).
 Look at the PNGs: layout problems do not show up as errors.
@@ -67,6 +68,15 @@ async def run(url: str, out: Path) -> None:
                 if step == 2 or key is None:
                     break
                 k_sid = api(url, f"/api/scans/{k_sid}/run_next?window={key}", "POST")["scan_id"]
+
+        # the labeller for every kind with a model: a draft from the model on a practice scan
+        for kind in active:
+            k_sid = api(url, "/api/virtual", "POST", {"kind": kind, "seed": 12})["scan_id"]
+            await pg.goto(f"{url}/#/label/{k_sid}")
+            await pg.wait_for_timeout(1500)
+            await pg.click("text=Draft from model")
+            await pg.wait_for_timeout(1500)
+            await pg.screenshot(path=str(out / f"label_{kind}.png"), full_page=True)
 
         # the automation tree of the runs recorded above
         rows = api(url, "/api/v1/runs")
