@@ -46,7 +46,9 @@ class ProtocolError(ValueError):
 
 
 class _Strict(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # protected_namespaces=(): the protocol has a field called model_id, which pydantic < 2.10
+    # warns about on import (its "model_" namespace)
+    model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
 
 # ---------------------------------------------------------------------------------------------

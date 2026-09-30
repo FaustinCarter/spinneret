@@ -64,6 +64,9 @@ def test_request_forms_and_validation():
     assert ann["a_boundaries"] == [[[0.82, 0.81], [0.822, 0.85]]] and ann["origin"] == "api"
     assert set(protocol.json_schemas()) == {"protocol", "request", "response", "run_start",
                                             "run_event", "run_close"}
+    # the model_id field must not make pydantic < 2.10 warn on every start
+    for m in (protocol.Options, protocol.Response):
+        assert "model_id" in m.model_fields and m.model_config["protected_namespaces"] == ()
 
 
 def test_navigation_over_http(ws, oracle_analyzer):
