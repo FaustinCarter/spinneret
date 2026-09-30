@@ -100,6 +100,29 @@ def test_pvt_axes_either_way_round(ws, oracle_analyzer):
     assert (a["status"], a["reason"]) == (b["status"], b["reason"])
 
 
+def test_pvt_confirmed_once_with_the_tunnel_gate_on_x(ws, oracle_analyzer, monkeypatch):
+    """A PvT FOUND held back by confidence gets one confirmation scan, also when the scans are
+    sent with the tunnel gate on x (the analysis swaps the axes, the history does not)."""
+    monkeypatch.setattr(oracle_analyzer, "found_threshold", 1.01)
+    for seed in range(40):
+        vd = virtual.create(ws, seed=seed, tuned=True)
+        wp, wt = virtual.start_window(vd, ("P1", "T1"))
+        first = virtual.measure(ws, vd["id"], "T1", "P1", wt, wp)
+        ws.save_scan(first)
+        a = analyze(ws, first)
+        ws.save_analysis(first.id, a)
+        if a.get("held_back_by") == "confidence":
+            break
+    else:
+        raise AssertionError("no PvT scan held back by confidence")
+    rec = a["recommendation"]
+    assert a["transposed"] and rec["kind"] == "confirm"
+    w = rec["next_window"]                  # in the analysis's order: plunger on x
+    again = virtual.measure(ws, vd["id"], "T1", "P1", tuple(w["y"]), tuple(w["x"]))
+    b = analyze(ws, again)
+    assert b["recommendation"]["kind"] != "confirm", b["recommendation"]
+
+
 def test_training_other_kinds(ws):
     """The generic pipeline trains, activates and runs a model per kind."""
     from chargecell.model.dataset import build_synthetic

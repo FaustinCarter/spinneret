@@ -119,12 +119,14 @@ def revisited_window(history: list[tuple[dict, dict]], x_gate: str, y_gate: str,
     wx, wy = x_rng[1] - x_rng[0], y_rng[1] - y_rng[0]
     n = 0
     for meta, ana in history:                      # newest first
-        if meta.get("x_gate") != x_gate or meta.get("y_gate") != y_gate:
+        ex = meta.get("extent")
+        if (meta.get("x_gate"), meta.get("y_gate")) == (y_gate, x_gate):
+            ex = [ex[2], ex[3], ex[0], ex[1]] if ex else None   # sent with the axes swapped
+        elif meta.get("x_gate") != x_gate or meta.get("y_gate") != y_gate:
             continue
         n += 1
         if n > recent:
             break
-        ex = meta.get("extent")
         if not ex or ana.get("status") == schema.FOUND or (status and ana.get("status") != status):
             continue
         x0, x1, y0, y1 = ex
