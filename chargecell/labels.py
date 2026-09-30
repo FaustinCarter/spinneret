@@ -161,6 +161,13 @@ def _simplify(pts: np.ndarray, tol: float) -> np.ndarray:
 
 def _boundaries_from_map(rel: np.ndarray, xs, ys, along: str) -> list:
     """Staircase polylines between k and k+1 regions of a relative occupancy map."""
+    return [poly for _, poly in _indexed_boundaries(rel, xs, ys, along)]
+
+
+def _indexed_boundaries(rel: np.ndarray, xs, ys, along: str) -> list[tuple[int, list]]:
+    """(k, polyline) for each k -> k+1 boundary with at least two points. A boundary that only
+    clips a corner of the window is short but must be kept: dropping it would shift every count
+    beyond it by one."""
     out = []
     kmax = int(rel.max())
     for k in range(int(rel.min()), kmax):
@@ -179,11 +186,20 @@ def _boundaries_from_map(rel: np.ndarray, xs, ys, along: str) -> list:
                 if len(hit) and hit[0] > 0 and (col[:hit[0]] <= k).all():
                     j = hit[0]
                     pts.append([xs[ix], (ys[j - 1] + ys[j]) / 2])
-        if len(pts) >= 4:
+        if len(pts) >= 2:
             p = np.asarray(pts)
             tol = 0.6 * max(xs[1] - xs[0], ys[1] - ys[0])
-            out.append(_simplify(p, tol).tolist())
+            out.append((k, _simplify(p, tol).tolist()))
     return out
+
+
+def _offset(occ: np.ndarray, bounds: list[tuple[int, list]]) -> int:
+    """The count left of (below) every drawn boundary: the first boundary's lower side, or, with
+    no boundary, the most common count."""
+    if bounds:
+        return int(bounds[0][0])
+    vals, counts = np.unique(occ, return_counts=True)
+    return int(vals[np.argmax(counts)])
 
 
 def _polylines_from_mask(mask: np.ndarray, xs, ys, min_px: int = 8) -> list:
@@ -212,10 +228,12 @@ def annotation_from_prediction(pred: dict, xs: np.ndarray, ys: np.ndarray, scan_
     ann = empty_annotation(scan_id)
     ann["origin"] = f"model:{model_id}"
     occ_a, occ_b = pred["occ_a"], pred["occ_b"]
-    ann["a_boundaries"] = _boundaries_from_map(occ_a, xs, ys, "y")
-    ann["b_boundaries"] = _boundaries_from_map(occ_b, xs, ys, "x")
-    ann["a_offset"] = int(occ_a.min()) if pred.get("ref_a") else None
-    ann["b_offset"] = int(occ_b.min()) if pred.get("ref_b") else None
+    ba = _indexed_boundaries(occ_a, xs, ys, "y")
+    bb = _indexed_boundaries(occ_b, xs, ys, "x")
+    ann["a_boundaries"] = [poly for _, poly in ba]
+    ann["b_boundaries"] = [poly for _, poly in bb]
+    ann["a_offset"] = _offset(occ_a, ba) if pred.get("ref_a") else None
+    ann["b_offset"] = _offset(occ_b, bb) if pred.get("ref_b") else None
     lines = pred.get("lines", {})
     if "spectator" in lines:
         ann["spectator_lines"] = _polylines_from_mask(lines["spectator"] > 0.5, xs, ys)
