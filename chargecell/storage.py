@@ -187,19 +187,33 @@ class Workspace:
                     out.append(m)
         return out
 
-    def active_model_id(self) -> str | None:
-        p = self.root / "models" / "ACTIVE"
+    @staticmethod
+    def model_kind(card: dict) -> str:
+        return card.get("kind") or card.get("config", {}).get("kind") or "PvP"
+
+    def active_file(self, kind: str = "PvP") -> Path:
+        """One active model per scan kind; PvP keeps the original file name."""
+        return self.root / "models" / ("ACTIVE" if kind == "PvP" else f"ACTIVE_{kind}")
+
+    def active_model_id(self, kind: str = "PvP") -> str | None:
+        p = self.active_file(kind)
         if p.exists():
             mid = p.read_text().strip()
-            if (self.model_dir(mid) / "model.json").exists():
+            card = read_json(self.model_dir(mid) / "model.json")
+            if card and self.model_kind(card) == kind:
                 return mid
-        models = self.list_models()
+        models = [m for m in self.list_models() if self.model_kind(m) == kind]
         return models[0]["id"] if models else None
 
+    def active_models(self) -> dict[str, str]:
+        from .kinds import KINDS
+        return {k: mid for k in KINDS if (mid := self.active_model_id(k))}
+
     def set_active_model(self, model_id: str) -> None:
-        if not (self.model_dir(model_id) / "model.json").exists():
+        card = read_json(self.model_dir(model_id) / "model.json")
+        if not card:
             raise KeyError(model_id)
-        (self.root / "models" / "ACTIVE").write_text(model_id)
+        self.active_file(self.model_kind(card)).write_text(model_id)
 
     # ------------------------------------------------------------------ virtual devices
     def save_virtual_device(self, vd_id: str, data: dict) -> None:

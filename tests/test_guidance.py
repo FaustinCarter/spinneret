@@ -20,8 +20,12 @@ def _scan_from_sample(s, device="sim"):
 def test_decisions_and_targets_with_perfect_perception(ws, oracle_analyzer):
     rng = np.random.default_rng(5)
     agree, n, anchored_err, direction_ok, direction_n = 0, 0, [], 0, 0
-    for _ in range(60):
-        s = generate_sample(rng)
+    for k in range(400):
+        if k >= 60 and len(anchored_err) >= 10:
+            break
+        # after the first 60 (the default outcome mix), draw only NOT_IN_WINDOW windows until
+        # there are enough anchored (high-confidence) targets to judge
+        s = generate_sample(rng) if k < 60 else generate_sample(rng, mix=(0, 1, 0))
         t = s["truth"]
         scan = _scan_from_sample(s)
         # an operator's rough prior for this device (+-30%), as for a new device of a known type
@@ -46,7 +50,7 @@ def test_decisions_and_targets_with_perfect_perception(ws, oracle_analyzer):
                     direction_n += 1
                     direction_ok += np.sign(d_true) == np.sign(d_rec)
     assert agree / n > 0.9, f"status agreement {agree}/{n}"
-    assert anchored_err and np.median(anchored_err) < 0.3, anchored_err
+    assert len(anchored_err) >= 5 and np.median(anchored_err) < 0.3, anchored_err
     assert direction_ok / max(1, direction_n) > 0.8, (direction_ok, direction_n)
 
 

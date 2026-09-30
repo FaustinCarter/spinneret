@@ -122,8 +122,10 @@ def test_training_submission_and_errors(ws, tmp_path):
     tc.post("/api/v1/scans", json=make_request(_sig(), x, y, "P1", "T12", kind="PvT",
                                                voltage_unit="mV", scan_id="pvt-001"))
     assert ws.load_scan("pvt-001").kind == "PvT"
-    r = tc.post("/api/v1/analyze", json=make_request(_sig(), x, y, "P1", "T12", kind="PvT"))
+    r = tc.post("/api/v1/analyze", json=make_request(_sig(), x, y, "P1", "B1", kind="PvB"))
     assert r.status_code == 422 and "cannot be analysed yet" in r.json()["detail"]
+    r = tc.post("/api/v1/analyze", json=make_request(_sig(), x, y, "P1", "T1", kind="PvT"))
+    assert r.status_code == 409 and "PvT" in r.json()["detail"]      # no PvT model trained yet
     from chargecell.model.dataset import real_arrays
     ws.save_annotation("pvt-001", {**ws.load_annotation("lab-001"), "scan_id": "pvt-001"})
     assert [m["scan_id"] for m in real_arrays(ws, 32)["meta"]] == ["lab-001"]

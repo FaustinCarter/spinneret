@@ -5,13 +5,15 @@ repeatable. Real data come from expert annotations in the workspace. Both are co
 the same fixed-size arrays:
 
     signal (N,S,S) float16    raw signal resampled to SxS (features are computed on the fly)
-    occ    (N,2,S,S) int8     electrons in dot a / dot b, -1 where unknown
-    lines  (N,S,S) uint8      bitmask of line families
-    status, reason (N,) int8; ref (N,2) int8
+    occ    (N,H,S,S) int8     the kind's per-pixel class heads, -1 where unknown
+                              (PvP: electrons in dot a / dot b; PvT: electrons, tunnel regime;
+                              tiebar: region around the tie bar)
+    lines  (N,S,S) uint8      bitmask of the kind's line families
+    status, reason (N,) int8; ref (N,n_ref) int8
 
 Augmentations are restricted to ones that preserve the physics:
   * signal polarity flip  (the sensor can sit on either flank of its Coulomb peak)
-  * transpose             (swap which dot is on x; labels for dot a/b swap accordingly)
+  * transpose             (PvP only: swap which dot is on x; labels for dot a/b swap accordingly)
   * mild extra noise and gain
 Mirroring an axis is NOT used: it would reverse the direction electrons are added.
 """
@@ -27,7 +29,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from .. import schema
+from .. import kinds, schema
 from ..labels import dense_from_annotation
 from ..preprocess import dilate, features, pack_lines, resample
 from ..simulate.generator import boundary_masks, generate_sample
@@ -64,13 +66,27 @@ def sample_to_arrays(s: dict, size: int) -> tuple[dict, dict]:
     return arrays, meta
 
 
+def _sampler(kind: str):
+    """(generate(rng, preset, mix) -> sample, to_arrays(sample, size) -> (arrays, meta))."""
+    if kind == "PvP":
+        return generate_sample, sample_to_arrays
+    if kind == "PvT":
+        from ..simulate import pvt
+        return pvt.generate_pvt_sample, pvt.pvt_to_arrays
+    if kind == "tiebar":
+        from ..simulate import tiebar
+        return tiebar.generate_tiebar_sample, tiebar.tiebar_to_arrays
+    raise ValueError(f"no simulator for scan kind {kind}")
+
+
 def _gen_shard(args) -> tuple[dict, list]:
-    seed, n, size, preset, mix = args
+    seed, n, size, preset, mix, kind = args
     rng = np.random.default_rng(seed)
+    generate, to_arrays = _sampler(kind)
     cols: dict[str, list] = {k: [] for k in ("signal", "occ", "lines", "status", "reason", "ref")}
     metas = []
     for _ in range(n):
-        arr, meta = sample_to_arrays(generate_sample(rng, preset, mix), size)
+        arr, meta = to_arrays(generate(rng, preset, mix), size)
         for k in cols:
             cols[k].append(arr[k])
         metas.append(meta)
@@ -81,12 +97,14 @@ def _gen_shard(args) -> tuple[dict, list]:
 def build_synthetic(ws: Workspace, name: str, n: int, size: int = 96, preset: str = "mixed",
                     seed: int = 0, mix=(0.40, 0.35, 0.25), workers: int = 1,
                     shard_size: int = 250,
-                    progress: Callable[[float, str], None] | None = None) -> dict:
+                    progress: Callable[[float, str], None] | None = None,
+                    kind: str = "PvP") -> dict:
+    kinds.get(kind)
     out = ws.synthetic_dir(name)
     out.mkdir(parents=True, exist_ok=True)
     n_shards = int(np.ceil(n / shard_size))
-    jobs = [(seed * 100003 + k, min(shard_size, n - k * shard_size), size, preset, tuple(mix))
-            for k in range(n_shards)]
+    jobs = [(seed * 100003 + k, min(shard_size, n - k * shard_size), size, preset, tuple(mix),
+             kind) for k in range(n_shards)]
     t0 = time.time()
     counts: dict[str, int] = {}
     done = 0
@@ -110,14 +128,14 @@ def build_synthetic(ws: Workspace, name: str, n: int, size: int = 96, preset: st
     else:
         for k, job in enumerate(jobs):
             handle(k, _gen_shard(job))
-    manifest = dict(name=name, n=n, size=size, preset=preset, seed=seed, mix=list(mix),
+    manifest = dict(name=name, kind=kind, n=n, size=size, preset=preset, seed=seed, mix=list(mix),
                     shards=n_shards, counts=counts, created=schema.now_iso(),
                     seconds=round(time.time() - t0, 1))
     write_json(out / "manifest.json", manifest)
     return manifest
 
 
-def load_synthetic(ws: Workspace, names: list[str], size: int) -> dict:
+def load_synthetic(ws: Workspace, names: list[str], size: int, kind: str = "PvP") -> dict:
     cols: dict[str, list] = {k: [] for k in ("signal", "occ", "lines", "status", "reason", "ref")}
     metas: list = []
     for name in names:
@@ -125,6 +143,9 @@ def load_synthetic(ws: Workspace, names: list[str], size: int) -> dict:
         man = json.loads((d / "manifest.json").read_text())
         if man["size"] != size:
             raise ValueError(f"dataset {name} was generated at {man['size']}px; model uses {size}px")
+        if man.get("kind", "PvP") != kind:
+            raise ValueError(f"dataset {name} holds {man.get('kind', 'PvP')} scans; this model "
+                             f"is for {kind} scans")
         for f in sorted(d.glob("shard_*.npz")):
             with np.load(f) as z:
                 for k in cols:
@@ -142,7 +163,10 @@ def load_synthetic(ws: Workspace, names: list[str], size: int) -> dict:
 # ---------------------------------------------------------------------------------------------
 # real (annotated) data
 # ---------------------------------------------------------------------------------------------
-def real_arrays(ws: Workspace, size: int, only_reviewed: bool = False) -> dict:
+def real_arrays(ws: Workspace, size: int, only_reviewed: bool = False, kind: str = "PvP") -> dict:
+    """Labelled real scans of one kind. Only PvP labels can be drawn in the labeller so far."""
+    if kind != "PvP":
+        return {}
     cols: dict[str, list] = {k: [] for k in ("signal", "occ", "lines", "status", "reason", "ref")}
     metas, groups = [], []
     for sid in ws.labelled_scan_ids():
@@ -221,10 +245,11 @@ def concat(*parts: dict) -> dict:
 # torch dataset
 # ---------------------------------------------------------------------------------------------
 class CSDDataset(Dataset):
-    def __init__(self, data: dict, augment: bool, seed: int = 0):
+    def __init__(self, data: dict, augment: bool, seed: int = 0, kind: str = "PvP"):
         self.d = data
         self.augment = augment
         self.rng = np.random.default_rng(seed)
+        self.spec = kinds.get(kind)
 
     def __len__(self) -> int:
         return len(self.d["status"])
@@ -240,7 +265,7 @@ class CSDDataset(Dataset):
                 sig = -sig
             sig = sig * rng.uniform(0.5, 2.0) + rng.normal(0, 0.02) * np.std(sig) * rng.normal(
                 size=sig.shape) * (rng.random() < 0.3)
-            if rng.random() < 0.5:
+            if self.spec.transpose_augment and rng.random() < 0.5:
                 sig = sig.T.copy()
                 occ = occ[::-1].transpose(0, 2, 1).copy()
                 ref = ref[::-1].copy()
@@ -249,17 +274,18 @@ class CSDDataset(Dataset):
                 b = (lp >> 1) & 1
                 lines_packed = (lp & ~np.uint8(3)) | (a << 1) | b
         x = features(sig)
-        lines = ((lines_packed[None] >> np.arange(len(schema.LINE_FAMILIES))[:, None, None]) & 1)
+        n_fam = len(self.spec.line_families)
+        lines = ((lines_packed[None] >> np.arange(n_fam)[:, None, None]) & 1)
         # occupancy only supervised where the dot is anchored
         occ = occ.copy()
-        if ref[0] < 0.5:
-            occ[0] = schema.OCC_IGNORE
-        if ref[1] < 0.5:
-            occ[1] = schema.OCC_IGNORE
+        item = {}
+        for k, head in enumerate(self.spec.class_heads):
+            if head.ref_index is not None and ref[head.ref_index] < 0.5:
+                occ[k] = schema.OCC_IGNORE
+            item[head.name] = torch.from_numpy(occ[k])
         return {
             "x": torch.from_numpy(x),
-            "occ_a": torch.from_numpy(occ[0]),
-            "occ_b": torch.from_numpy(occ[1]),
+            **item,
             "lines": torch.from_numpy(lines.astype(np.float32)),
             "status": torch.tensor(int(self.d["status"][i])),
             "reason": torch.tensor(int(self.d["reason"][i])),

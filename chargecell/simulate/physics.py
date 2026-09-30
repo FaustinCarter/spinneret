@@ -144,28 +144,37 @@ def _precompute(p: DeviceParams) -> tuple[np.ndarray, np.ndarray]:
 
 
 def detuning(p: DeviceParams, V: np.ndarray, offset: np.ndarray | None = None) -> np.ndarray:
-    """eps (P,3) for plunger voltages V (P,3) in mV."""
-    off = p.offset if offset is None else offset
-    return off[None, :] - V @ p.lever.T
+    """eps (P,3) for plunger voltages V (P,3) in mV. ``offset`` is (3,) or per pixel (P,3)
+    (other gates, e.g. a tunnel gate, enter through the offset)."""
+    off = p.offset if offset is None else np.asarray(offset, float)
+    return (off if off.ndim == 2 else off[None, :]) - V @ p.lever.T
 
 
 def classical_ground_state(p: DeviceParams, V: np.ndarray, offset=None) -> np.ndarray:
-    """T=0, t=0 ground state occupations (P,3). Cheap; used for geometry/oracle labels."""
+    """T=0, t=0 ground state occupations (P,3). Cheap; used for geometry/oracle labels.
+    ``offset`` may be (3,) or per pixel (P,3)."""
     E0, _ = _precompute(p)
     eps = detuning(p, V, offset)
     E = E0[None, :] + eps @ STATES.T.astype(float)
     return STATES[np.argmin(E, axis=1)]
 
 
-def occupations(p: DeviceParams, V: np.ndarray, offset=None, chunk: int = 8192):
-    """Thermal expectation <n_i> (P,3) and ground-state charge configuration (P,3)."""
+def occupations(p: DeviceParams, V: np.ndarray, offset=None, chunk: int = 8192, kT=None):
+    """Thermal expectation <n_i> (P,3) and ground-state charge configuration (P,3).
+
+    ``offset`` may be per pixel (P,3); ``kT`` (meV) may be per pixel (P,), e.g. to include
+    lifetime broadening from a fast reservoir."""
     E0, T = _precompute(p)
     NS = STATES.astype(float)
     out_mean = np.empty((len(V), 3))
     out_gs = np.empty((len(V), 3), dtype=np.int64)
+    off_all = None if offset is None else np.asarray(offset, float)
+    kT_all = None if kT is None else np.broadcast_to(np.asarray(kT, float), (len(V),))
     for start in range(0, len(V), chunk):
         v = V[start:start + chunk]
-        eps = detuning(p, v, offset)
+        off = off_all[start:start + chunk] if (off_all is not None and off_all.ndim == 2) \
+            else off_all
+        eps = detuning(p, v, off)
         E = E0[None, :] + eps @ NS.T                              # (P,S)
         idx = np.argpartition(E, K_LOW, axis=1)[:, :K_LOW]        # (P,K)
         Ek = np.take_along_axis(E, idx, axis=1)
@@ -174,7 +183,9 @@ def occupations(p: DeviceParams, V: np.ndarray, offset=None, chunk: int = 8192):
         H -= Ek.min(1)[:, None, None] * np.eye(K_LOW)[None]       # numerical conditioning
         w, vec = np.linalg.eigh(H)
         prob = vec ** 2                                           # (P,K_state,K_eig)
-        boltz = np.exp(-(w - w[:, :1]) / max(p.kT, 1e-6))
+        kt = (np.maximum(kT_all[start:start + chunk], 1e-6)[:, None] if kT_all is not None
+              else max(p.kT, 1e-6))
+        boltz = np.exp(-(w - w[:, :1]) / kt)
         boltz /= boltz.sum(1, keepdims=True)
         nk = NS[idx]                                              # (P,K_state,3)
         per_eig = np.einsum("pse,psi->pei", prob, nk)             # (P,K_eig,3)

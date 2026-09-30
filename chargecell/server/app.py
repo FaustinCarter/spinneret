@@ -63,7 +63,8 @@ def create_app(workspace: str | Path) -> FastAPI:
     @app.get("/api/status")
     def status():
         ids = ws.scan_ids()
-        return dict(workspace=str(ws.root), active_model=ws.active_model_id(), n_scans=len(ids),
+        return dict(workspace=str(ws.root), active_model=ws.active_model_id(),
+                    active_models=ws.active_models(), n_scans=len(ids),
                     n_labelled=len(ws.labelled_scan_ids()), n_models=len(ws.list_models()),
                     devices=[d.name for d in ws.list_devices()],
                     running_jobs=[j for j in jobs.list() if j["state"] in ("queued", "running")])
@@ -304,8 +305,9 @@ def create_app(workspace: str | Path) -> FastAPI:
     # ------------------------------------------------------------------ training + models
     @app.get("/api/models")
     def models():
-        active = ws.active_model_id()
-        return _clean([dict(m, active=(m["id"] == active)) for m in ws.list_models()])
+        active = set(ws.active_models().values())
+        return _clean([dict(m, kind=ws.model_kind(m), active=(m["id"] in active))
+                       for m in ws.list_models()])
 
     @app.post("/api/models/{model_id}/activate")
     def activate(model_id: str):

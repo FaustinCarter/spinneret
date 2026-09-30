@@ -12,11 +12,11 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from .. import schema
+from .. import kinds, schema
 from ..preprocess import features, resample
 from ..schema import Scan
 from ..storage import Workspace
-from .train import load_models, predict_batch
+from .train import load_models, model_kind, predict_batch
 
 
 @dataclass
@@ -69,21 +69,27 @@ class Analyzer:
         if not self.models:
             raise RuntimeError(f"model {model_id} has no trained members")
         self.model_id = model_id
+        self.kind = model_kind(self.card)
+        self.spec = kinds.get(self.kind)
         self.size = int(self.card["config"]["size"])
         self.found_threshold = float(self.card.get("found_threshold", 0.9))
         self.uncertainty_threshold = float(self.card.get("uncertainty_threshold", 0.2))
         self._run_lock = threading.Lock()
 
     @classmethod
-    def get(cls, ws: Workspace, model_id: str | None = None) -> "Analyzer":
-        mid = model_id or ws.active_model_id()
+    def get(cls, ws: Workspace, model_id: str | None = None, kind: str = "PvP") -> "Analyzer":
+        mid = model_id or ws.active_model_id(kind)
         if mid is None:
-            raise RuntimeError("No trained model yet. Train one on the Train page first.")
+            what = "" if kind == "PvP" else f" for {kind} scans"
+            raise RuntimeError(f"No trained model{what} yet. Train one on the Train page first.")
         key = f"{ws.root}:{mid}"
         with cls._lock:
             if key not in cls._cache:
                 cls._cache[key] = Analyzer(ws, mid)
-            return cls._cache[key]
+            an = cls._cache[key]
+        if an.kind != kind:
+            raise RuntimeError(f"Model {mid} is for {an.kind} scans, not {kind} scans.")
+        return an
 
     def predict(self, scan: Scan, carrier: str = "electron") -> dict:
         sig = canonical_signal(scan, self.size, carrier)
@@ -94,17 +100,14 @@ class Analyzer:
         ent = lambda p: float(-(p * torch.log(p + 1e-9)).sum())
         mean = sm.mean(0)
         mi = ent(mean) - float(np.mean([ent(p) for p in sm]))
-        occ_a_p = r["occ_a"][0].numpy()
-        occ_b_p = r["occ_b"][0].numpy()
-        occ_ent = float(np.mean(-(occ_a_p * np.log(occ_a_p + 1e-9)).sum(0)
-                                - (occ_b_p * np.log(occ_b_p + 1e-9)).sum(0)))
+        heads = {f"{h.name}_p": r[h.name][0].numpy() for h in self.spec.class_heads}
+        occ_ent = float(np.mean(sum(-(q * np.log(q + 1e-9)).sum(0) for q in heads.values())))
         return {
             "status_p": mean.numpy(),
             "status_members": sm.numpy(),
             "reason_p": r["reason"][0].numpy(),
             "ref_p": r["ref"][0].numpy(),
-            "occ_a_p": occ_a_p,
-            "occ_b_p": occ_b_p,
+            **heads,                                # PvP: occ_a_p, occ_b_p
             "lines_p": r["lines"][0].numpy(),
             "mutual_info": max(0.0, mi),
             "occ_entropy": occ_ent,

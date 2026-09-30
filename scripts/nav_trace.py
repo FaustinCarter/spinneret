@@ -32,7 +32,7 @@ def make_ws(a):
     if a.oracle:
         import conftest
         an = conftest.OracleAnalyzer(ws)
-        infer.Analyzer.get = classmethod(lambda cls, w, model_id=None: an)
+        infer.Analyzer.get = classmethod(lambda cls, w, model_id=None, kind="PvP": an)
     else:
         src = Path(a.model_dir).resolve()
         shutil.copytree(src, ws.model_dir(src.name), dirs_exist_ok=True)
@@ -75,8 +75,14 @@ def bench(a):
     tot = dict(n=0, found=0, correct=0, scans=[])
     for seed in (1, 2, 4):
         ws = make_ws(a)
-        r = virtual.evaluate_navigation(ws, n_devices=10, max_scans=a.max_scans, seed=seed,
-                                        prior=not a.no_prior, limits=not a.no_prior)
+        r = virtual.evaluate(ws, a.kind, n_devices=10, max_scans=a.max_scans, seed=seed,
+                             prior=not a.no_prior, limits=not a.no_prior)
+        if a.verbose:
+            for x in r["results"]:
+                if not x["scans"] or not x["correct"]:
+                    print(" ", seed, x["device"], x["scans"], x["correct"],
+                          [(t["status"][:5], t["reason"], t["truth"][:5], t["truth_reason"])
+                           for t in x["trail"]])
         tot["n"] += r["n"]; tot["found"] += r["found"]; tot["correct"] += r["correct"]
         tot["scans"] += [x["scans"] for x in r["results"] if x["scans"]]
     print(f"devices {tot['n']}, found {tot['found']}, correct {tot['correct']}, "
@@ -91,6 +97,9 @@ if __name__ == "__main__":
     ap.add_argument("--devices", type=int, default=6)
     ap.add_argument("--max-scans", type=int, default=8)
     ap.add_argument("--bench", action="store_true")
+    ap.add_argument("--kind", default="PvP", choices=["PvP", "PvT", "tiebar"],
+                    help="scan kind for --bench")
+    ap.add_argument("-v", "--verbose", action="store_true", help="--bench: show failures")
     ap.add_argument("--no-prior", action="store_true",
                     help="practice devices without a typical spacing or safe limits")
     args = ap.parse_args()

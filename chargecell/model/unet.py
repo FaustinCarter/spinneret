@@ -1,4 +1,6 @@
-"""Multi-head U-Net for charge-stability diagrams.
+"""Multi-head U-Net for charge-stability diagrams, one architecture for every scan kind.
+
+The heads come from the kind's spec (``chargecell/kinds.py``). For PvP scans:
 
 Dense heads (per pixel):
   occ_a, occ_b : electrons in dot a / dot b, classes 0,1,2,3,4+
@@ -9,6 +11,10 @@ Global heads (per scan):
   ref          : is dot a / dot b anchored (empty region visible)? Occupancy is only
                  trustworthy for a dot whose ref is true; the loss is masked the same way.
 
+PvT scans have an occupancy head (the swept dot), a tunnel-rate "regime" head, loading/spectator/
+sensor lines and one anchoring flag; tie-bar scans have a "region" head (the four cells around
+the tie bar) and a, b, tiebar, interdot and sensor lines.
+
 Deliberately small (~0.5-2 M parameters): the data are simple images, the labels are precise,
 and several independently trained copies (an ensemble) buy more reliability than one big net.
 """
@@ -18,7 +24,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .. import schema
+from .. import kinds, schema
 
 
 def _block(cin: int, cout: int) -> nn.Sequential:
@@ -30,8 +36,9 @@ def _block(cin: int, cout: int) -> nn.Sequential:
 
 
 class ChargeCellNet(nn.Module):
-    def __init__(self, in_ch: int = 3, base: int = 16, depth: int = 4):
+    def __init__(self, in_ch: int = 3, base: int = 16, depth: int = 4, kind: str = "PvP"):
         super().__init__()
+        self.spec = spec = kinds.get(kind)
         chans = [base * 2 ** i for i in range(depth)]
         self.enc = nn.ModuleList()
         c = in_ch
@@ -44,14 +51,14 @@ class ChargeCellNet(nn.Module):
         for ch in reversed(chans):
             self.dec.append(_block(c + ch, ch))
             c = ch
-        n_occ = schema.N_OCC_CLASSES
-        self.head_dense = nn.Conv2d(c, 2 * n_occ + len(schema.LINE_FAMILIES), 1)
+        # PvP keeps the original layout: 2 x 5 occupancy + 5 line channels; 3 + 10 + 2 globals
+        self.head_dense = nn.Conv2d(c, spec.n_dense, 1)
         g_in = 2 * chans[-1] * 2 + 2 * c
         self.head_global = nn.Sequential(
             nn.Linear(g_in, 128), nn.SiLU(), nn.Dropout(0.2),
-            nn.Linear(128, len(schema.STATUSES) + len(schema.REASONS) + 2),
+            nn.Linear(128, len(schema.STATUSES) + len(spec.reasons) + spec.n_ref),
         )
-        self.config = dict(in_ch=in_ch, base=base, depth=depth)
+        self.config = dict(in_ch=in_ch, base=base, depth=depth, kind=spec.name)
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         skips = []
@@ -65,13 +72,15 @@ class ChargeCellNet(nn.Module):
             x = F.interpolate(x, size=s.shape[-2:], mode="bilinear", align_corners=False)
             x = blk(torch.cat([x, s], 1))
         dense = self.head_dense(x)
-        n = schema.N_OCC_CLASSES
         g = self.head_global(torch.cat([g_mid, x.mean((2, 3)), x.amax((2, 3))], 1))
-        ns, nr = len(schema.STATUSES), len(schema.REASONS)
-        return {
-            "occ_a": dense[:, :n], "occ_b": dense[:, n:2 * n], "lines": dense[:, 2 * n:],
-            "status": g[:, :ns], "reason": g[:, ns:ns + nr], "ref": g[:, ns + nr:],
-        }
+        out, k = {}, 0
+        for h in self.spec.class_heads:
+            out[h.name] = dense[:, k:k + h.classes]
+            k += h.classes
+        out["lines"] = dense[:, k:]
+        ns, nr = len(schema.STATUSES), len(self.spec.reasons)
+        out.update(status=g[:, :ns], reason=g[:, ns:ns + nr], ref=g[:, ns + nr:])
+        return out
 
 
 def count_params(m: nn.Module) -> int:

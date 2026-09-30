@@ -31,7 +31,7 @@ from .config import DeviceConfig
 from .schema import Scan
 
 PROTOCOL = "chargecell/1"
-ANALYSABLE_KINDS = ("PvP",)                 # scan kinds with a trained model today
+ANALYSABLE_KINDS = ("PvP", "PvT", "tiebar")  # scan kinds ChargeCell has models for
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _DTYPES = {"float32": "<f4", "float64": "<f8", "int16": "<i2", "int32": "<i4", "uint16": "<u2",
            "uint32": "<u4"}
@@ -87,10 +87,12 @@ class EncodedArray(_Strict):
 
 
 class ScanIn(_Strict):
-    kind: str = Field("PvP", description="PvP (plunger vs plunger) is analysed today; other "
-                                         "kinds (e.g. PvT, tiebar) can be stored for training")
-    x: Axis = Field(description="horizontal axis: the gate of dot A")
-    y: Axis = Field(description="vertical axis: the gate of dot B")
+    kind: str = Field("PvP", description="PvP (plunger vs plunger), PvT (plunger vs its "
+                                         "reservoir tunnel gate) or tiebar (PvP zoomed on the "
+                                         "(1,1)-(2,0) transition); other kinds can be stored for "
+                                         "training")
+    x: Axis = Field(description="horizontal axis: the gate of dot A (PvT: the plunger)")
+    y: Axis = Field(description="vertical axis: the gate of dot B (PvT: the tunnel gate)")
     signal: Union[list[list[Optional[float]]], EncodedArray] = Field(
         description="signal[iy][ix], ny rows of nx values; null for missing points")
     voltage_unit: Literal["V", "mV"] = Field(
@@ -215,16 +217,24 @@ class Window(_Strict):
 
 
 class Feature(_Strict):
-    type: Literal["charge_cell", "transition_point"]
-    label: str = Field(description="e.g. '(1,1)' or '(1,1)-(2,0)'")
+    type: Literal["charge_cell", "transition_point", "loading_line", "operating_point",
+                  "triple_point", "tie_bar", "readout_point"]
+    label: str = Field(description="e.g. '(1,1)', '(1,1)-(2,0)', '0->1', 'one electron'")
     point: dict[str, float] = Field(description="gate -> V")
     polygon: Optional[list[tuple[float, float]]] = Field(
-        None, description="outline as (x, y) points in V, x = first gate of 'point'")
+        None, description="closed outline as (x, y) points in V, x = the scan's x gate")
+    polyline: Optional[list[tuple[float, float]]] = Field(
+        None, description="open line as (x, y) points in V (loading lines, the tie bar)")
     extent: Optional[dict[str, tuple[float, float]]] = Field(None, description="gate -> [min, max] V")
+    properties: dict[str, Any] = Field(
+        default_factory=dict, description="measurements of the feature, e.g. the tie bar's "
+                                          "coupling ratio or the clean tunnel-gate range")
 
 
 class ScanStep(_Strict):
-    purpose: Literal["locate", "rescan_after_fix", "readout_zoom"]
+    purpose: Literal["locate", "rescan_after_fix", "readout_zoom", "retune_coupling"]
+    scan_kind: str = Field("PvP", description="send the next scan with this kind (the readout "
+                                              "zoom is a tiebar scan)")
     window: Window
     move: dict[str, float] = Field(
         default_factory=dict, description="change of the window centre per swept gate, V")
@@ -280,12 +290,18 @@ def response_from_analysis(analysis: dict, cfg: DeviceConfig,
         move = rec.get("move") or {}
         return ScanStep(
             purpose=purpose, window=_window(win),
+            scan_kind="tiebar" if purpose == "readout_zoom" else analysis.get("kind", "PvP"),
             move={g: d for g, d in move.items() if g in swept} if purpose == "locate" else {},
             gate_changes={g: d for g, d in move.items() if g not in swept},
             physical_moves=rec.get("physical_moves") if purpose == "locate" else None,
             max_step=cfg.max_step, confidence=confidence, basis=rec.get("basis", ""))
 
-    if status == schema.FOUND:
+    if status == schema.FOUND and analysis.get("kind", "PvP") != "PvP":
+        outcome = "found"
+        features = [Feature(**f) for f in analysis.get("features", [])]
+        if rec.get("retune_window"):
+            next_scan = step("retune_coupling", rec["retune_window"], "medium")
+    elif status == schema.FOUND:
         outcome = "found"
         cell = analysis.get("cell") or {}
         features.append(Feature(type="charge_cell", label="(1,1)", point=cell["centroid_v"],

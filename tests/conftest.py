@@ -12,13 +12,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from chargecell import schema  # noqa: E402
+from chargecell import kinds, schema, virtual  # noqa: E402
 from chargecell.model import infer  # noqa: E402
-from chargecell.preprocess import dilate, resample  # noqa: E402
+from chargecell.preprocess import dilate, resample, unpack_lines  # noqa: E402
 from chargecell.schema import Scan  # noqa: E402
-from chargecell.simulate.generator import (Artifacts, Window, boundary_masks, oracle,  # noqa: E402
-                                           render)
-from chargecell.simulate.physics import DeviceParams  # noqa: E402
+from chargecell.simulate.generator import Artifacts, Window, boundary_masks  # noqa: E402
+from chargecell.simulate.pvt import pvt_to_arrays  # noqa: E402
+from chargecell.simulate.tiebar import tiebar_to_arrays  # noqa: E402
 from chargecell.storage import Workspace  # noqa: E402
 
 S = 64
@@ -40,6 +40,43 @@ def truth_to_prediction(rend: dict, truth: dict, w: Window, size: int = S) -> di
                 mutual_info=0.0, occ_entropy=0.0, signal_canonical=resample(rend["signal"], size, 1))
 
 
+def _onehot(labels: np.ndarray, n: int) -> np.ndarray:
+    return np.stack([(labels == k) for k in range(n)]).astype(float)
+
+
+def _globals(spec, truth: dict) -> dict:
+    st = np.eye(3)[schema.STATUSES.index(truth["status"])] * 0.98 + 0.01 / 3
+    rs = np.eye(len(spec.reasons))[spec.reasons.index(truth["reason"])]
+    return dict(status_p=st, status_members=np.stack([st, st]), reason_p=rs, mutual_info=0.0,
+                occ_entropy=0.0)
+
+
+def pvt_truth_to_prediction(sim: dict, size: int = S) -> dict:
+    """Perfect PvT prediction from a (noise-free) practice-scan simulation."""
+    spec = kinds.PVT
+    sample = dict(render=sim["render"], truth=sim["oracle"], window=sim["window"],
+                  pvt=sim["pvt"], artifacts=Artifacts())
+    arr, _ = pvt_to_arrays(sample, size)
+    occ = np.minimum(resample(sim["render"]["occ"][..., sim["pvt"].dot], size, 0), 4)
+    reg = resample(sim["oracle"]["regime"], size, 0)
+    return dict(occ_p=_onehot(occ, 5), regime_p=_onehot(reg, 3),
+                lines_p=unpack_lines(arr["lines"], len(spec.line_families)),
+                ref_p=np.array([float(sim["oracle"]["ref"])]),
+                signal_canonical=resample(sim["render"]["signal"], size, 1),
+                **_globals(spec, sim["oracle"]))
+
+
+def tiebar_truth_to_prediction(sim: dict, size: int = S) -> dict:
+    spec = kinds.TIEBAR
+    sample = dict(render=sim["render"], truth=sim["oracle"], window=sim["window"],
+                  params=sim["params"], artifacts=Artifacts())
+    arr, _ = tiebar_to_arrays(sample, size)
+    return dict(region_p=_onehot(arr["occ"][0], 5),
+                lines_p=unpack_lines(arr["lines"], len(spec.line_families)),
+                ref_p=np.zeros(0), signal_canonical=resample(sim["render"]["signal"], size, 1),
+                **_globals(spec, sim["oracle"]))
+
+
 class OracleAnalyzer:
     model_id = "oracle"
     size = S
@@ -56,19 +93,14 @@ class OracleAnalyzer:
     def predict(self, scan: Scan, carrier: str = "electron") -> dict:
         if scan.id in self.registered:
             return self.registered[scan.id]
-        vd_id = scan.extra.get("virtual_device")
-        if not vd_id:
+        if not scan.extra.get("virtual_device"):
             raise RuntimeError("OracleAnalyzer has no truth for this scan")
-        vd = self.ws.load_virtual_device(vd_id)
-        p = DeviceParams.from_dict(vd["params"])
-        gates = ["P1", "P2", "P3"]
-        a, b = gates.index(scan.x_gate), gates.index(scan.y_gate)
-        c = ({0, 1, 2} - {a, b}).pop()
-        w = Window(pair=(a, b), x0=scan.x[0] * 1e3, x1=scan.x[-1] * 1e3, y0=scan.y[0] * 1e3,
-                   y1=scan.y[-1] * 1e3, nx=len(scan.x), ny=len(scan.y),
-                   v_spectator=scan.voltage_state[gates[c]] * 1e3)
-        rend = render(p, w, Artifacts(snr_target=1e3), np.random.default_rng(0))
-        return truth_to_prediction(rend, oracle(p, w, Artifacts(snr_target=1e3), rend), w)
+        sim = virtual.simulate_clean(self.ws, scan)          # noise-free, same physics
+        if scan.kind == "PvT":
+            return pvt_truth_to_prediction(sim, self.size)
+        if scan.kind == "tiebar":
+            return tiebar_truth_to_prediction(sim, self.size)
+        return truth_to_prediction(sim["render"], sim["oracle"], sim["window"], self.size)
 
 
 @pytest.fixture
@@ -79,5 +111,6 @@ def ws(tmp_path):
 @pytest.fixture
 def oracle_analyzer(ws, monkeypatch):
     an = OracleAnalyzer(ws)
-    monkeypatch.setattr(infer.Analyzer, "get", classmethod(lambda cls, w, model_id=None: an))
+    monkeypatch.setattr(infer.Analyzer, "get",
+                        classmethod(lambda cls, w, model_id=None, kind="PvP": an))
     return an

@@ -53,17 +53,18 @@ def features(sig: np.ndarray) -> np.ndarray:
     return np.stack([z, gx, gy]).astype(np.float32)
 
 
-def pack_lines(masks: dict[str, np.ndarray]) -> np.ndarray:
+def pack_lines(masks: dict[str, np.ndarray], families=None) -> np.ndarray:
+    """Line masks -> uint8 bitmask, one bit per family in the kind's order (default PvP)."""
     out = np.zeros(next(iter(masks.values())).shape, np.uint8)
-    for bit, fam in enumerate(schema.LINE_FAMILIES):
+    for bit, fam in enumerate(families or schema.LINE_FAMILIES):
         if fam in masks:
             out |= (masks[fam].astype(np.uint8) << bit)
     return out
 
 
-def unpack_lines(packed: np.ndarray) -> np.ndarray:
+def unpack_lines(packed: np.ndarray, n_families: int | None = None) -> np.ndarray:
     """uint8 bitmask (...,H,W) -> float (...,F,H,W)."""
-    bits = [(packed >> b) & 1 for b in range(len(schema.LINE_FAMILIES))]
+    bits = [(packed >> b) & 1 for b in range(n_families or len(schema.LINE_FAMILIES))]
     return np.stack(bits, axis=-3).astype(np.float32)
 
 

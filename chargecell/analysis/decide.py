@@ -55,6 +55,36 @@ def _edge_fraction(mask: np.ndarray) -> float:
     return float((inner & edge).sum() / max(1, inner.sum()))
 
 
+ANCHOR_WIDTH = 1.3   # empty region needed to count electrons, in electron spacings
+
+
+def empty_region_too_narrow(na: np.ndarray, nb: np.ndarray) -> str | None:
+    """Only a line-free stretch wider than any occupied cell (about 1.25 spacings) proves that
+    a dot is empty. Compares the width of the n = 0 region with the spacing between the dot's
+    0->1 and 1->2 transitions measured in the same map (index space: dot a along rows, dot b
+    along columns). Returns which dot fails, or None."""
+    for name, occ in (("dot a", na), ("dot b", nb.T)):
+        widths, spacings = [], []
+        for row in occ:
+            z = np.nonzero(row >= 1)[0]
+            t = np.nonzero(row >= 2)[0]
+            if len(z) and z[0] > 0 and (row[:z[0]] == 0).all():
+                widths.append(z[0])
+                if len(t) and t[0] > z[0]:
+                    spacings.append(t[0] - z[0])
+        if len(widths) >= 3 and len(spacings) >= 3:
+            ok = np.array(widths) >= ANCHOR_WIDTH * np.median(spacings)
+            if ok.mean() <= 0.2:
+                return name
+    return None
+
+
+def demoted_status(sp) -> str:
+    """Where a FOUND that failed its checks goes. FOUND and NOT_IN_WINDOW both mean "readable",
+    so the scan is only called uninterpretable if that is more likely than readable."""
+    return schema.UNINTERPRETABLE if sp[2] > 0.5 else schema.NOT_IN_WINDOW
+
+
 def cell_geometry(na: np.ndarray, nb: np.ndarray, grid: Grid, xg: str, yg: str) -> dict | None:
     cell = _largest_component((na == 1) & (nb == 1))
     if cell.sum() < 4:
@@ -87,10 +117,19 @@ def _boundary_mid(cell: np.ndarray, other: np.ndarray, grid: Grid, xg: str, yg: 
 
 def analyze(ws: Workspace, scan: Scan, model_id: str | None = None,
             cfg: DeviceConfig | None = None) -> dict:
+    """Analyse a scan with the model for its kind (PvP, PvT or tiebar)."""
+    if scan.kind == "PvT":
+        from .pvt import analyze_pvt
+        return analyze_pvt(ws, scan, model_id, cfg)
+    if scan.kind == "tiebar":
+        from .tiebar import analyze_tiebar
+        return analyze_tiebar(ws, scan, model_id, cfg)
+    if scan.kind not in ("PvP", "", None):
+        raise ValueError(f"scan kind '{scan.kind}' cannot be analysed")
     cfg = cfg or ws.get_device(scan.device)
     history = [h for h in ws.iter_analyses(scan.device) if h[0].get("id") != scan.id]
     q = quality_metrics(scan)
-    base = dict(scan_id=scan.id, created=schema.now_iso(), quality=q,
+    base = dict(scan_id=scan.id, created=schema.now_iso(), kind="PvP", quality=q,
                 scan=dict(x_gate=scan.x_gate, y_gate=scan.y_gate, device=scan.device))
 
     if q["hard_fail"]:
@@ -128,9 +167,14 @@ def analyze(ws: Workspace, scan: Scan, model_id: str | None = None,
             checks.append("no (1,1) region was segmented")
         elif cell["edge_fraction"] > 0.4:
             checks.append("the (1,1) region is mostly cut off by the window edge")
+        if ref_a and ref_b:
+            short = empty_region_too_narrow(na, nb)
+            if short:
+                checks.append(f"the empty region of {short} is narrower than an electron spacing, "
+                              "so it could be an occupied cell cut off by the window edge")
         if checks:
             demoted = True
-            status = schema.UNINTERPRETABLE if sp[2] > sp[1] else schema.NOT_IN_WINDOW
+            status = demoted_status(sp)
 
     allowed = (["none"] if status == schema.FOUND else schema.NOT_IN_WINDOW_REASONS
                if status == schema.NOT_IN_WINDOW else schema.UNINTERPRETABLE_REASONS)

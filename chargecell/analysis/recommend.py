@@ -113,8 +113,9 @@ def spectator_check(scan: Scan, cfg: DeviceConfig, history: list[tuple[dict, dic
 
 
 def revisited_window(history: list[tuple[dict, dict]], x_gate: str, y_gate: str, x_rng: list,
-                     y_rng: list, recent: int = 6) -> str | None:
-    """Id of a recent unsuccessful scan of (nearly) the same window, if any."""
+                     y_rng: list, recent: int = 6, status: str | None = None) -> str | None:
+    """Id of a recent unsuccessful scan of (nearly) the same window, if any (optionally only
+    scans with the given status)."""
     wx, wy = x_rng[1] - x_rng[0], y_rng[1] - y_rng[0]
     n = 0
     for meta, ana in history:                      # newest first
@@ -124,7 +125,7 @@ def revisited_window(history: list[tuple[dict, dict]], x_gate: str, y_gate: str,
         if n > recent:
             break
         ex = meta.get("extent")
-        if not ex or ana.get("status") == schema.FOUND:
+        if not ex or ana.get("status") == schema.FOUND or (status and ana.get("status") != status):
             continue
         x0, x1, y0, y1 = ex
         if (abs((x0 + x1) / 2 - np.mean(x_rng)) < 0.25 * abs(wx)
@@ -231,8 +232,9 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
             rec["tiebar_window"] = {"x_gate": xg, "y_gate": yg,
                                     "x": [ro[xg] - w / 2, ro[xg] + w / 2, n],
                                     "y": [ro[yg] - w / 2, ro[yg] + w / 2, n]}
-            steps.append(f"For readout setup, zoom on the (1,1)-(2,0) boundary near {xg} = "
-                         f"{_v(ro[xg])}, {yg} = {_v(ro[yg])} (a {fmt_mag(w)} window).")
+            steps.append(f"For readout setup, take a tie-bar scan: zoom on the (1,1)-(2,0) "
+                         f"boundary near {xg} = {_v(ro[xg])}, {yg} = {_v(ro[yg])} (a "
+                         f"{fmt_mag(w)} window).")
         for sp in decision.get("spectators", []):
             if sp["status"] != "verified":
                 steps.append(f"Spectator {sp['gate']} is {sp['status']}: this scan cannot show "
@@ -291,8 +293,25 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
             rec["headline"] = "The scan cannot be interpreted. Check the setup and rescan."
         if quality.get("warnings"):
             steps += quality["warnings"]
+        seen = revisited_window(history, xg, yg, x_rng, y_rng, recent=3,
+                                status=schema.UNINTERPRETABLE)
+        if seen is not None and reason not in ("resolution_too_coarse", "dots_merged"):
+            # the same window already failed once: a rescan alone is unlikely to help, so widen
+            # it around the same centre (a sensor problem or artefact may be local)
+            cx, cy = np.mean(x_rng), np.mean(y_rng)
+            hx, hy = 0.75 * (x_rng[1] - x_rng[0]), 0.75 * (y_rng[1] - y_rng[0])
+            x_rng = _clip_to_limits([cx - hx, cx + hx], xg, cfg, warnings)
+            y_rng = _clip_to_limits([cy - hy, cy + hy], yg, cfg, warnings)
+            nx, ny = int(min(cfg.max_points, round(1.5 * nx))), int(min(cfg.max_points, round(1.5 * ny)))
+            rec["confidence"] = "low"
+            warnings.append(f"This window could not be interpreted before either (scan {seen}). "
+                            "If the fix did not help, check the sensor and wiring; the next "
+                            "window is 1.5x wider in case the problem is local.")
+            if (w_lim := unchecked_limits_warning([xg, yg], cfg)):
+                warnings.append(w_lim)
         rec["next_window"] = {"x_gate": xg, "y_gate": yg, "x": [*x_rng, nx], "y": [*y_rng, ny]}
-        steps.append("Rescan the same window after the fix.")
+        steps.append("Rescan the same window after the fix." if seen is None else
+                     "Rescan with the wider window after checking the setup.")
         return rec
 
     # ------------------------------------------------------------------ NOT_IN_WINDOW
@@ -424,17 +443,23 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
             warnings.append("Target taken from an earlier scan. If other gates have moved since, "
                             "the cell will have shifted.")
 
-    # window size: ~3.2 cells so the empty region and the (2,0)/(0,2) neighbours are included
+    # window size: ~3.4 cells, shifted toward the empty region so that more than a full cell of
+    # it is in view (needed to count electrons) plus the (1,1) cell and its upper neighbours
     cur_wi, cur_wj = S - 1, S - 1
+    tx, ty = grid.to_volts(i_t, j_t)                 # where ChargeCell expects (1,1)
     # a spacing not measured in this scan is only a guess: never shrink the window on a guess
     measured_a = sa_src == "measured in this scan"
     measured_b = sb_src == "measured in this scan"
     if sa_i and confidence != "low":
-        wi = 3.2 * sa_i if measured_a else max(3.2 * sa_i, cur_wi * wf_a)
+        wi = 3.4 * sa_i if measured_a else max(3.4 * sa_i, cur_wi * wf_a)
+        if confidence == "high" or ta is not None:
+            i_t -= 0.25 * sa_i
     else:
         wi = cur_wi * wf_a
     if sb_i and confidence != "low":
-        wj = 3.2 * sb_i if measured_b else max(3.2 * sb_i, cur_wj * wf_b)
+        wj = 3.4 * sb_i if measured_b else max(3.4 * sb_i, cur_wj * wf_b)
+        if confidence == "high" or tb is not None:
+            j_t -= 0.25 * sb_i
     else:
         wj = cur_wj * wf_b
     x_rng, y_rng = _window(grid, i_t, j_t, wi, wj)
@@ -454,7 +479,7 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
     lim_x = cfg.step_limit(float(scan.x[-1] - scan.x[0]))
     lim_y = cfg.step_limit(float(scan.y[-1] - scan.y[0]))
     f = min(1.0, lim_x / abs(mx) if mx else 1.0, lim_y / abs(my) if my else 1.0)
-    final_target = {xg: cx_new, yg: cy_new}
+    final_target = {xg: float(tx), yg: float(ty)}
     if f < 1.0:
         limit = (f"the {fmt_mag(cfg.max_step)} step limit" if cfg.max_step else
                  "one window width (no step limit is set for this device)")
@@ -499,3 +524,86 @@ def recommend(scan: Scan, grid: Grid, cfg: DeviceConfig, decision: dict, lattice
         steps.append("Physical gate changes (from the virtual-gate matrix): " + ", ".join(
             f"{g} {_mv(d)}" for g, d in rec["physical_moves"].items() if abs(d) > 1e-6))
     return rec
+
+
+# ---------------------------------------------------------------------------------------------
+# helpers shared by the PvT and tie-bar guidance
+# ---------------------------------------------------------------------------------------------
+def finalize_window(scan: Scan, cfg: DeviceConfig, x_rng: list, y_rng: list,
+                    warnings: list, what: str = "the target") -> dict:
+    """Split a move larger than the step limit (device max_step, else one window width per
+    gate), keep the window inside the safe limits, and report the move. Returns x, y ranges,
+    the move per gate and the final (unsplit) window centre."""
+    xg, yg = scan.x_gate, scan.y_gate
+    cx_old, cy_old = float(np.mean(scan.x[[0, -1]])), float(np.mean(scan.y[[0, -1]]))
+    cx_new, cy_new = float(np.mean(x_rng)), float(np.mean(y_rng))
+    mx, my = cx_new - cx_old, cy_new - cy_old
+    lim_x = cfg.step_limit(float(scan.x[-1] - scan.x[0]))
+    lim_y = cfg.step_limit(float(scan.y[-1] - scan.y[0]))
+    f = min(1.0, lim_x / abs(mx) if mx else 1.0, lim_y / abs(my) if my else 1.0)
+    if f < 1.0:
+        limit = (f"the {fmt_mag(cfg.max_step)} step limit" if cfg.max_step else
+                 "one window width (no step limit is set for this device)")
+        warnings.append(f"The full move to {what} ({xg} {_mv(mx)}, {yg} {_mv(my)}) exceeds "
+                        f"{limit}. Take the first step shown, rescan, and let ChargeCell "
+                        "re-evaluate.")
+        hx, hy = (x_rng[1] - x_rng[0]) / 2, (y_rng[1] - y_rng[0]) / 2
+        x_rng = [cx_old + mx * f - hx, cx_old + mx * f + hx]
+        y_rng = [cy_old + my * f - hy, cy_old + my * f + hy]
+    x_rng = _clip_to_limits(list(x_rng), xg, cfg, warnings)
+    y_rng = _clip_to_limits(list(y_rng), yg, cfg, warnings)
+    if (w_lim := unchecked_limits_warning([xg, yg], cfg)):
+        warnings.append(w_lim)
+    return dict(x=[float(v) for v in x_rng], y=[float(v) for v in y_rng],
+                move={xg: float(np.mean(x_rng)) - cx_old, yg: float(np.mean(y_rng)) - cy_old},
+                target={xg: cx_new, yg: cy_new})
+
+
+def describe_move(move: dict, scan: Scan) -> str:
+    verb = lambda d: "raise" if d > 0 else "lower"
+    tiny = 0.5 * min(abs(scan.pitch[0]) or 1e-12, abs(scan.pitch[1]) or 1e-12)
+    parts = [f"{verb(d)} {g} by {fmt_mag(d)}" for g, d in move.items() if abs(d) >= tiny]
+    return " and ".join(parts) if parts else "keep the centre"
+
+
+def window_step(scan: Scan, x_rng: list, y_rng: list, nx: int, ny: int) -> str:
+    sx, sy = x_rng[1] - x_rng[0], y_rng[1] - y_rng[0]
+    return (f"Next scan: {scan.x_gate} {fmt_v(x_rng[0], sx)} to {fmt_v(x_rng[1], sx)} ({nx} "
+            f"points), {scan.y_gate} {fmt_v(y_rng[0], sy)} to {fmt_v(y_rng[1], sy)} ({ny} points).")
+
+
+def common_fix(reason: str, cfg: DeviceConfig) -> tuple[str, list[str]] | None:
+    """Headline and steps for problems that are fixed the same way for every scan kind."""
+    M = cfg.sensor_gate
+    if reason == "low_snr":
+        return ("Too noisy to read. Improve the signal, then rescan the same window.",
+                [f"Check the sensor ({M}) sits on the steepest flank of its Coulomb peak; "
+                 "retune it if it has drifted.",
+                 "Average longer: noise falls as 1/sqrt(time), so 4x the integration time "
+                 "halves it."])
+    if reason == "sensor_insensitive":
+        return ("The charge sensor has lost sensitivity. Retune it, then rescan the same "
+                "window.",
+                [f"Sweep {M} across its Coulomb peak and park it on the steepest flank.",
+                 f"If your setup supports it, compensate the sweep on {M} so the sensor stays "
+                 "on the flank."])
+    if reason == "charge_instability":
+        return ("The pattern jumps between sweeps. Let the device settle and rescan.",
+                ["Rescan the same window. Charge switching often relaxes some minutes after a "
+                 "large voltage move.",
+                 "If it persists: sweep more slowly, avoid large steps, and check for a noisy "
+                 "gate line."])
+    return None
+
+
+def widen_if_revisited(history, scan: Scan, x_rng: list, y_rng: list, warnings: list,
+                       what: str = "the goal") -> tuple[list, list]:
+    """If the proposed window was already scanned without success, cover both it and the
+    present window instead (guidance must never go round in circles)."""
+    seen = revisited_window(history, scan.x_gate, scan.y_gate, x_rng, y_rng)
+    if seen is None:
+        return x_rng, y_rng
+    warnings.append(f"The suggested window was already scanned (scan {seen}) without reaching "
+                    f"{what}, so the next scan covers both it and this window.")
+    return ([min(x_rng[0], float(scan.x[0])), max(x_rng[1], float(scan.x[-1]))],
+            [min(y_rng[0], float(scan.y[0])), max(y_rng[1], float(scan.y[-1]))])

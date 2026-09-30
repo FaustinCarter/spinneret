@@ -23,6 +23,7 @@ from .physics import (DeviceParams, centre_offsets, classical_ground_state, occu
                       sensor_current, sensor_mu, sensor_slope)
 
 PLUNGERS = ("P1", "P2", "P3")
+ANCHOR_WIDTH = 1.3   # empty region needed to count electrons, in addition voltages
 
 
 # ---------------------------------------------------------------------------------------------
@@ -133,12 +134,14 @@ def sample_window(rng, p: DeviceParams, intent: str, pair=None, coarse: bool = F
     dva, dvb, dvc = p.addition_voltage(a), p.addition_voltage(b), p.addition_voltage(c)
     ca, cb = p.v11[a], p.v11[b]
     if intent == schema.FOUND:
-        wx, wy = rng.uniform(2.3, 4.5) * dva, rng.uniform(2.3, 4.5) * dvb
+        # keep enough of the empty region inside to count from (ANCHOR_WIDTH and a margin),
+        # then the (1,1) cell and part of its neighbours
+        ea, eb = rng.uniform(1.4, 2.2), rng.uniform(1.4, 2.2)
+        wx, wy = (ea + rng.uniform(1.25, 2.6)) * dva, (eb + rng.uniform(1.25, 2.6)) * dvb
         if rng.random() < 0.5:
-            wy = wx * dvb / dva
-        # keep the empty region inside: centre shifted so ~1.2-2.2 cells lie below (1,1)
-        cx = ca - 0.5 * dva + wx / 2 - rng.uniform(1.0, 1.8) * dva + rng.normal(0, 0.15) * dva
-        cy = cb - 0.5 * dvb + wy / 2 - rng.uniform(1.0, 1.8) * dvb + rng.normal(0, 0.15) * dvb
+            wy = max(wx * dvb / dva, (eb + 1.25) * dvb)
+        cx = ca - 0.5 * dva - ea * dva + wx / 2 + rng.normal(0, 0.08) * dva
+        cy = cb - 0.5 * dvb - eb * dvb + wy / 2 + rng.normal(0, 0.08) * dvb
     else:
         wx, wy = rng.uniform(0.8, 4.5) * dva, rng.uniform(0.8, 4.5) * dvb
         cx = ca + rng.uniform(-4.0, 5.0) * dva
@@ -261,9 +264,18 @@ def render(p: DeviceParams, w: Window, art: Artifacts, rng: np.random.Generator)
         mean[sel], gs[sel] = occupations(p, V[sel], offset=off)
 
     mean_obs = _apply_latching(gs, mean, p.latch, w, rng)
+    meas = measure_sensor(p, V, mean_obs, w, art, rng)
+    return dict(x=xs, y=ys, occ=gs.reshape(w.ny, w.nx, 3), **meas)
 
-    # sensor
-    mu_clean = sensor_mu(p, V, mean_obs) + art.sensor_detune
+
+def measure_sensor(p: DeviceParams, V: np.ndarray, occ_obs: np.ndarray, w, art: Artifacts,
+                   rng: np.random.Generator, mu_extra: np.ndarray | float = 0.0) -> dict:
+    """Charge-sensor current for pixels V (P,3) with observed occupations (P,3): sensor
+    crosstalk, 1/f and telegraph noise on its chemical potential, gain drift, white noise.
+    ``w`` needs nx, ny and fast_axis; ``mu_extra`` adds crosstalk from other swept gates."""
+    slow = _slow_index(w).ravel()
+    n_slow = w.nx if w.fast_axis == "y" else w.ny
+    mu_clean = sensor_mu(p, V, occ_obs) + art.sensor_detune + mu_extra
     t_idx = _raster_index(w).ravel()
     order = np.argsort(t_idx)
     noise_mu = np.zeros(len(V))
@@ -280,13 +292,10 @@ def render(p: DeviceParams, w: Window, art: Artifacts, rng: np.random.Generator)
     typical_step = np.abs(sensor_slope(p, np.array([p.s_mu_ref])))[0] * float(np.mean(p.s_kappa))
     sigma_w = max(typical_step, 0.02 * p.s_amp) / art.snr_target
     sig = sig + rng.normal(0, sigma_w, len(V))
-
     return dict(
-        x=xs, y=ys,
         signal=sig.reshape(w.ny, w.nx).astype(np.float32),
         clean=clean.reshape(w.ny, w.nx),
         mu=mu_clean.reshape(w.ny, w.nx),
-        occ=gs.reshape(w.ny, w.nx, 3),
         sigma_white=float(sigma_w),
         sigma_mu=float(np.sqrt(art.pink_sigma ** 2 + (art.telegraph_amp / 2) ** 2)),
     )
@@ -359,7 +368,10 @@ def oracle(p: DeviceParams, w: Window, art: Artifacts, rend: dict) -> dict:
         has0 = (o == 0).mean() > 0.03
         has1 = (o >= 1).mean() > 0.03
         width0 = (o == 0).sum(axis=axis) * pitch        # per row (axis=1) or column (axis=0)
-        wide = (width0 >= 0.25 * dv).mean() > 0.2
+        # only a line-free stretch wider than any occupied cell proves the dot is empty: an
+        # occupied cell is at most ~1.25 addition voltages wide (the third electron also pays the
+        # valley/orbital energy), and a narrower strip at the edge could be one
+        wide = (width0 >= ANCHOR_WIDTH * dv).mean() > 0.2
         return bool(has0 and has1 and wide)
 
     ref_a = anchored(oa, px, dva, 1)

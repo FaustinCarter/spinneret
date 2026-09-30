@@ -58,7 +58,7 @@ def cmd_simulate(a) -> None:
 
     ws = Workspace(a.workspace)
     man = build_synthetic(ws, a.name, a.n, a.size, a.preset, a.seed, workers=a.workers,
-                          progress=lambda f, m: print(f"\r{m}", end="", flush=True))
+                          progress=lambda f, m: print(f"\r{m}", end="", flush=True), kind=a.kind)
     print("\n" + json.dumps(man, indent=1))
 
 
@@ -67,7 +67,8 @@ def cmd_train(a) -> None:
     from .storage import Workspace
 
     ws = Workspace(a.workspace)
-    cfg = TrainConfig(synthetic=a.synthetic, use_real=not a.no_real, size=a.size, base=a.base,
+    cfg = TrainConfig(synthetic=a.synthetic, kind=a.kind, use_real=not a.no_real, size=a.size,
+                      base=a.base,
                       epochs=a.epochs, ensemble=a.ensemble, batch_size=a.batch_size, lr=a.lr,
                       notes=a.notes)
     mid = train(ws, cfg, lambda f, m, r: print(f"[{f:5.1%}] {m} {r if r else ''}", flush=True))
@@ -157,10 +158,12 @@ def main(argv=None) -> None:
     s.add_argument("--preset", default="mixed", choices=["mixed", "hrl_linear", "hrl_triangle"])
     s.add_argument("--seed", type=int, default=0)
     s.add_argument("--workers", type=int, default=1)
+    s.add_argument("--kind", default="PvP", choices=["PvP", "PvT", "tiebar"])
     s.set_defaults(fn=cmd_simulate)
 
     s = sub.add_parser("train", help="train a model version")
     s.add_argument("--synthetic", nargs="*", default=[])
+    s.add_argument("--kind", default="PvP", choices=["PvP", "PvT", "tiebar"])
     s.add_argument("--no-real", action="store_true", help="ignore labelled real scans")
     s.add_argument("--size", type=int, default=96)
     s.add_argument("--base", type=int, default=16)
