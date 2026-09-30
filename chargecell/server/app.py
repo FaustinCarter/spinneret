@@ -15,7 +15,7 @@ from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .. import labels, protocol, schema, virtual
+from .. import kinds, labels, protocol, schema, virtual
 from ..analysis.decide import analyze, prediction_for_annotation
 from ..config import DeviceConfig
 from ..importers.generic import load_any
@@ -91,10 +91,10 @@ def create_app(workspace: str | Path) -> FastAPI:
     async def import_scans(files: list[UploadFile] = File(...), x_gate: str = Form(""),
                            y_gate: str = Form(""), device: str = Form("default"),
                            cooldown: str = Form(""), axis_units: str = Form("V"),
-                           notes: str = Form("")):
+                           notes: str = Form(""), kind: str = Form("")):
         imported, errors = [], []
         meta = dict(x_gate=x_gate or None, y_gate=y_gate or None, device=device,
-                    cooldown=cooldown, axis_units=axis_units, notes=notes)
+                    cooldown=cooldown, axis_units=axis_units, notes=notes, kind=kind or None)
         for f in files:
             try:
                 scan = load_any(f.filename, await f.read(), meta)
@@ -198,6 +198,8 @@ def create_app(workspace: str | Path) -> FastAPI:
             s = ws.scan_summary(sid)
             if s["label"] and s["label"].get("status"):
                 continue
+            if (s.get("kind") or "PvP") != "PvP":        # the labeller draws PvP labels only
+                continue
             unc = (s["analysis"] or {}).get("uncertainty")
             rows.append((-(unc if unc is not None else 0.5), s))
         rows.sort(key=lambda r: r[0])
@@ -279,11 +281,14 @@ def create_app(workspace: str | Path) -> FastAPI:
         mix = body.get("mix", [0.40, 0.35, 0.25])
         seed = int(body.get("seed", np.random.randint(1, 10**6)))
         workers = int(body.get("workers", 1))
+        kind = body.get("kind", "PvP")
+        if kind not in kinds.KINDS:
+            raise HTTPException(400, f"kind must be one of {list(kinds.KINDS)}")
 
         def fn(progress):
             return build_synthetic(ws, name, n, size, preset, seed, tuple(mix), workers,
-                                   progress=progress)
-        return jobs.submit("synthetic", f"Generate {n} synthetic scans ({name})", fn)
+                                   progress=progress, kind=kind)
+        return jobs.submit("synthetic", f"Generate {n} synthetic {kind} scans ({name})", fn)
 
     @app.get("/api/synthetic/{name}/preview")
     def preview_synthetic(name: str, n: int = 12, offset: int = 0):
@@ -322,14 +327,26 @@ def create_app(workspace: str | Path) -> FastAPI:
         from ..model.train import TrainConfig, train
         allowed = {f.name for f in fields(TrainConfig)}
         cfg = TrainConfig(**{k: v for k, v in body.items() if k in allowed})
+        if cfg.kind not in kinds.KINDS:
+            raise HTTPException(400, f"kind must be one of {list(kinds.KINDS)}")
         if not cfg.synthetic and not (cfg.use_real and ws.labelled_scan_ids()):
             raise HTTPException(400, "Choose at least one synthetic dataset or label some scans.")
+        for name in cfg.synthetic:
+            man = json.loads((ws.synthetic_dir(name) / "manifest.json").read_text()) \
+                if (ws.synthetic_dir(name) / "manifest.json").exists() else None
+            if man is None:
+                raise HTTPException(400, f"No synthetic dataset called {name}.")
+            if man.get("kind", "PvP") != cfg.kind or man["size"] != cfg.size:
+                raise HTTPException(400, f"Dataset {name} holds {man.get('kind', 'PvP')} scans at "
+                                         f"{man['size']} px; this model is for {cfg.kind} scans "
+                                         f"at {cfg.size} px.")
 
         def fn(progress):
             mid = train(ws, cfg, progress)
             Analyzer._cache.clear()
             return {"model_id": mid}
-        return jobs.submit("train", f"Train model ({cfg.ensemble} x {cfg.epochs} epochs)", fn)
+        return jobs.submit("train", f"Train {cfg.kind} model ({cfg.ensemble} x {cfg.epochs} "
+                                    "epochs)", fn)
 
     # ------------------------------------------------------------------ jobs
     @app.get("/api/jobs")
@@ -355,17 +372,29 @@ def create_app(workspace: str | Path) -> FastAPI:
 
     @app.post("/api/virtual")
     def new_virtual(body: dict = Body(default={})):
-        vd = virtual.create(ws, body.get("seed"), body.get("preset", "hrl_linear"))
-        wx, wy = virtual.start_window(vd)
-        scan = virtual.measure(ws, vd["id"], "P1", "P2", wx, wy)
+        kind = body.get("kind", "PvP")
+        if kind not in kinds.KINDS:
+            raise HTTPException(400, f"kind must be one of {list(kinds.KINDS)}")
+        vd = virtual.create(ws, body.get("seed"), body.get("preset", "hrl_linear"),
+                            tuned=body.get("tuned", kind != "PvT"))
+        if kind == "PvT":
+            wp, wt = virtual.start_window(vd, ("P1", "T1"))
+            scan = virtual.measure(ws, vd["id"], "P1", "T1", wp, wt)
+        elif kind == "tiebar":
+            (gx, wx), (gy, wy) = virtual._tiebar_start(vd, np.random.default_rng(vd["seed"]))
+            scan = virtual.measure(ws, vd["id"], gx, gy, wx, wy, kind="tiebar")
+        else:
+            wx, wy = virtual.start_window(vd)
+            scan = virtual.measure(ws, vd["id"], "P1", "P2", wx, wy)
         ws.save_scan(scan)
-        return {"virtual_device": vd["id"], "device": vd["device"], "scan_id": scan.id}
+        return {"virtual_device": vd["id"], "device": vd["device"], "scan_id": scan.id,
+                "kind": kind}
 
     @app.post("/api/virtual/{vd_id}/measure")
     def measure_virtual(vd_id: str, body: dict = Body(...)):
         try:
             scan = virtual.measure(ws, vd_id, body["x_gate"], body["y_gate"], tuple(body["x"]),
-                                   tuple(body["y"]))
+                                   tuple(body["y"]), kind=body.get("kind"))
         except (KeyError, ValueError) as e:
             raise HTTPException(400, str(e))
         ws.save_scan(scan)
@@ -385,12 +414,16 @@ def create_app(workspace: str | Path) -> FastAPI:
             raise HTTPException(400, "This analysis has no recommended window.")
         rec_move = (res["recommendation"].get("move") or {})
         vd = ws.load_virtual_device(vd_id)
-        for g, d in rec_move.items():   # barrier moves are not simulated; plunger moves are
+        for g, d in rec_move.items():   # e.g. an exchange-gate change before the scan
             if g in vd["voltage_state"] and g not in (win["x_gate"], win["y_gate"]):
                 vd["voltage_state"][g] += d
         ws.save_virtual_device(vd_id, vd)
-        new = virtual.measure(ws, vd_id, win["x_gate"], win["y_gate"], tuple(win["x"]),
-                              tuple(win["y"]))
+        kind = "tiebar" if window in ("tiebar_window", "retune_window") else s.kind
+        try:
+            new = virtual.measure(ws, vd_id, win["x_gate"], win["y_gate"], tuple(win["x"]),
+                                  tuple(win["y"]), kind=kind)
+        except (KeyError, ValueError) as e:
+            raise HTTPException(400, str(e))
         ws.save_scan(new)
         try:
             ws.save_analysis(new.id, analyze(ws, new))

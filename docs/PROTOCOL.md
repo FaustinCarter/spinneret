@@ -4,6 +4,18 @@ ChargeCell does not talk to instruments. Any measurement backend (QCoDeS, QICK, 
 home-grown DAQ script, ...) sends it a scan as JSON and gets a JSON answer back. The same format
 submits scans, with or without an expert label, as training data.
 
+Three kinds of charge-stability scan are analysed, one model each, following HRL's tune-up:
+
+| `scan.kind` | Axes | Goal | Found means |
+|---|---|---|---|
+| `PvP` | plunger vs plunger (dot A on x, dot B on y) | find the (1,1) cell | (1,1) centre, outline, readout boundaries |
+| `PvT` | plunger vs the tunnel gate to its reservoir (either way round) | load one electron with a clean tunnel rate | loading lines, the clean tunnel-gate range, the one-electron operating point |
+| `tiebar` | plunger vs plunger zoomed on the (1,1)-(2,0) transition | set up readout | triple points, tie bar with a coupling measurement, first readout point |
+
+**No voltage scale is assumed anywhere.** Devices and technologies differ widely, so every
+number in a response is measured from the scan itself or derived from your device settings;
+device settings are optional, and missing ones are replaced by fractions of the scan window.
+
 - HTTP: run `chargecell serve` and `POST` to the endpoints below.
 - Files: `chargecell analyze request.json --json` (or `--out DIR` to write
   `<name>.response.json`). Request files can also be imported on the GUI's Scans page.
@@ -54,8 +66,8 @@ errors or a sentence. `409` means no trained model is available.
 
 | Field | Meaning |
 |---|---|
-| `scan.kind` | `PvP` (plunger vs plunger) is the only kind analysed today. Other kinds, such as `PvT` or `tiebar`, can be submitted as training data for future models. |
-| `scan.x`, `scan.y` | The swept gates. `x` is horizontal (dot A), `y` vertical (dot B). Give either `values` or `start`/`stop`/`points`. Either sweep direction is fine. |
+| `scan.kind` | `PvP`, `PvT` or `tiebar` (see the table above). Other kinds can be submitted as training data for future models; analysing them returns 422. |
+| `scan.x`, `scan.y` | The swept gates. PvP and tiebar: `x` is dot A, `y` dot B, and the tie bar is the (1,1)-(2,0) transition where dot A holds two (swap the axes to study (1,1)-(0,2)). PvT: one axis is the plunger, the other its reservoir tunnel gate (ChargeCell recognises tunnel gates from the device settings or a `T` name). Give either `values` or `start`/`stop`/`points`. Either sweep direction is fine. |
 | `scan.signal` | `signal[iy][ix]`: `ny` rows of `nx` values. Use `null` for missing points. Or send it binary: `{"dtype": "float32", "shape": [ny, nx], "data": "<base64 of little-endian bytes, C order>"}` (dtypes: float32, float64, int16, int32, uint16, uint32). |
 | `scan.voltage_unit` | `V` or `mV`. Applies to `x`, `y`, `voltage_state` and label coordinates. Responses are always in volts. |
 | `scan.voltage_state` | DC voltages of the other gates during the scan. Spectator plungers matter most: they let ChargeCell check spectator occupancy against earlier scans. |
@@ -105,7 +117,7 @@ Unknown fields are rejected, so typos surface as errors instead of being silentl
 
 | outcome | status | Meaning | Where to look |
 |---|---|---|---|
-| `found` | `FOUND` | (1,1) is in the window, and the empty region is visible for both dots, so the electron count is certain. | `features`. `next_scan` may hold an optional `readout_zoom` window on the (1,1)-(2,0) boundary. |
+| `found` | `FOUND` | PvP: (1,1) is in the window and the empty region (more than an electron spacing of it) is visible for both dots, so the count is certain. PvT: the empty dot and its first two loading lines are traced where electrons load cleanly. Tiebar: the tie bar and both triple points are in the window. | `features`. PvP: `next_scan` may hold a `readout_zoom` window to send as a `tiebar` scan. Tiebar: `next_scan` may be `retune_coupling` (change an exchange gate, rescan). |
 | `next_scan` | `NOT_IN_WINDOW` | ChargeCell is confident where to look next (guidance confidence high or medium). | `next_scan` |
 | `no_confident_step` | `UNINTERPRETABLE`, or `NOT_IN_WINDOW` with nothing to navigate by | ChargeCell could not turn this scan into a next step with confidence. `reason` says why. | `suggestion` (best guess, for a person to review), `headline`, `steps` |
 
@@ -116,25 +128,44 @@ low-confidence exploration, `suggestion.purpose` is `locate`.
 `needs_review: true` means the model was unsure or one of its checks disagreed. It can accompany
 any outcome. A cautious automated loop should hand these scans to a person.
 
+A typical automated tune-up of one qubit pair: PvT on each edge plunger until `found` (sets its
+tunnel gate and loads one electron), PvP on the pair until `found`, then the `readout_zoom` window
+as a `tiebar` scan until `found`, applying `retune_coupling` steps if you set a coupling target.
+
 ### `features` (outcome `found`)
 
-| type | label | Fields |
-|---|---|---|
-| `charge_cell` | `(1,1)` | `point` (centre, gate → V), `polygon` (outline as (x, y) in V), `extent` (gate → [min, max] V) |
-| `transition_point` | `(1,1)-(2,0)`, `(1,1)-(0,2)` | `point`: midpoint of the boundary, useful for setting up readout |
+| kind | type | label | Fields |
+|---|---|---|---|
+| PvP | `charge_cell` | `(1,1)` | `point` (centre, gate → V), `polygon` (outline as (x, y) in V), `extent` (gate → [min, max] V) |
+| PvP | `transition_point` | `(1,1)-(2,0)`, `(1,1)-(0,2)` | `point`: midpoint of the boundary, useful for setting up readout |
+| PvT | `loading_line` | `0->1`, `1->2`, ... | `polyline` along the line where electrons load visibly; `properties.electrons_before` |
+| PvT | `operating_point` | `one electron` | `point` (plunger and tunnel gate); `properties.tunnel_gate_clean_from` / `_to`: the tunnel-gate range where electrons load cleanly (null: beyond the window) |
+| tiebar | `triple_point` | `(1,0)-(1,1)-(2,0)`, `(1,1)-(2,0)-(2,1)` | `point` |
+| tiebar | `tie_bar` | `(1,1)-(2,0)` | `polyline` (the two triple points), `point` (midpoint), `properties` below |
+| tiebar | `readout_point` | `spin-to-charge readout (first guess)` | `point`: on the (2,0) side, just past the transition |
 
-Future scan kinds (PvT, tiebar) will add feature types. Clients should ignore types they do not know.
+Tie-bar `properties`: `length_V`; `interdot_width_V` (FWHM of the charge transfer across the tie
+bar, fitted on the raw signal); `coupling_ratio` = width / length, a dimensionless, voltage-free
+measure of the interdot tunnel coupling (about 3 t_c / E_m, with E_m the mutual charging energy;
+it cannot go below the thermal width, roughly 0.05-0.15 depending on the electron temperature
+and E_m); `assessment` (`weak` / `in target` / `strong` against the device's
+`tiebar_coupling_target`, or `strong` when the triple points are close to merging); and, only
+when the device settings give plunger lever arms and the electron temperature,
+`tunnel_coupling_ueV`, `tunnel_coupling_GHz` and `thermal_limited`.
+
+Clients should ignore feature types and properties they do not know.
 
 ### `next_scan` / `suggestion` (a `ScanStep`)
 
 | Field | Meaning |
 |---|---|
-| `purpose` | `locate` (find (1,1)), `rescan_after_fix`, or `readout_zoom` |
+| `purpose` | `locate` (move toward the goal), `rescan_after_fix`, `readout_zoom` (PvP → take a tie-bar scan), or `retune_coupling` (tiebar: change the exchange gate in `gate_changes`, rescan) |
+| `scan_kind` | The kind to send the next scan as (`tiebar` for a readout zoom, else the same kind). |
 | `window` | Absolute start/stop in volts and the number of points for both swept gates. Always inside the device's safe limits. |
 | `move` | Change of the window centre for each swept gate (V). If the full move is larger than `max_step`, ChargeCell gives only the first step and says so in `warnings`. The move can exceed `max_step` only when the window had to be shifted inside the safe limits, which `warnings` also reports. |
 | `gate_changes` | Changes to other gates to make before scanning (V), e.g. `{"X1": -0.010}` to separate merged dots. |
 | `physical_moves` | The move in physical gates, when the scan was in virtual gates and the device has a virtual-gate matrix. |
-| `max_step` | Largest DC step the device allows (V). Ramp in steps no larger than this. |
+| `max_step` | Largest DC step the device allows (V), from the device settings. Ramp in steps no larger than this. `null`: no limit is set; moves were then limited to one window width. |
 | `confidence`, `basis` | How the step was computed (`high`: from anchored transitions in this scan). |
 
 ## Submitting training data
@@ -158,7 +189,9 @@ labelled later in the GUI (the label queue puts the most informative scans first
 }
 ```
 
-Label fields mean the same as in the GUI's labeller (`docs/CODEMAP.md` §2, "Annotation"):
+Labels with boundaries exist for PvP scans only so far; for PvT and tiebar scans send the status
+and reason (the scans are stored for when keypoint labels are added). Label fields mean the same
+as in the GUI's labeller (`docs/CODEMAP.md` §2, "Annotation"):
 
 - Each `a_boundaries` entry is a polyline of (x, y) points, drawn bottom to top, separating k
   from k+1 electrons in dot A.
@@ -170,7 +203,7 @@ Label fields mean the same as in the GUI's labeller (`docs/CODEMAP.md` §2, "Ann
   `dots_merged`, `charge_instability`, `resolution_too_coarse` for UNINTERPRETABLE.
 
 A status alone is accepted, but the boundaries are what teach the network where the cells are.
-Only `PvP` scans are used when training the current model.
+Only labelled `PvP` scans are used for training so far.
 
 ## Python client
 

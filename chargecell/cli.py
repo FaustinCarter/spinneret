@@ -22,19 +22,27 @@ BUNDLED_MODELS = Path(__file__).parent / "assets" / "models"
 
 
 def _install_bundled_model(ws) -> None:
-    """Copy the bundled starter model into an empty workspace so analysis works on day one."""
-    if ws.list_models() or not BUNDLED_MODELS.exists():
+    """Copy the bundled starter models (one per scan kind) into a workspace that has no model of
+    that kind yet, so analysis works on day one."""
+    if not BUNDLED_MODELS.exists():
         return
-    for d in BUNDLED_MODELS.iterdir():
-        if any(f.read_bytes()[:40].startswith(b"version https://git-lfs") for f in d.glob("*.pt")):
-            print(f"The bundled model {d.name} was not downloaded (Git LFS pointer files). "
-                  "Run `git lfs install && git lfs pull` in the repository and reinstall, or "
-                  "train a model on the Train page.")
+    have = {ws.model_kind(m) for m in ws.list_models()}
+    for d in sorted(BUNDLED_MODELS.iterdir()):
+        card = d / "model.json"
+        if not card.exists():
             continue
-        if (d / "model.json").exists():
-            shutil.copytree(d, ws.model_dir(d.name), dirs_exist_ok=True)
-            ws.set_active_model(d.name)
-            print(f"Installed bundled starter model {d.name}")
+        kind = ws.model_kind(json.loads(card.read_text()))
+        if kind in have:
+            continue
+        if any(f.read_bytes()[:40].startswith(b"version https://git-lfs") for f in d.glob("*.pt")):
+            print(f"The bundled {kind} model {d.name} was not downloaded (Git LFS pointer "
+                  "files). Run `git lfs install && git lfs pull` in the repository and "
+                  "reinstall, or train a model on the Train page.")
+            continue
+        shutil.copytree(d, ws.model_dir(d.name), dirs_exist_ok=True)
+        ws.set_active_model(d.name)
+        have.add(kind)
+        print(f"Installed bundled starter {kind} model {d.name}")
 
 
 def cmd_serve(a) -> None:
@@ -127,11 +135,11 @@ def cmd_schema(a) -> None:
 
 def cmd_navigate(a) -> None:
     from .storage import Workspace
-    from .virtual import evaluate_navigation
+    from .virtual import evaluate
 
     ws = Workspace(a.workspace)
     _install_bundled_model(ws)
-    r = evaluate_navigation(ws, a.devices, a.max_scans, seed=a.seed)
+    r = evaluate(ws, a.kind, a.devices, a.max_scans, seed=a.seed)
     for x in r["results"]:
         print(x["device"], "found after", x["scans"], "scans" if x["scans"] else "- not found",
               "" if x["correct"] in (None, True) else "(WRONG: truth disagrees)",
@@ -190,6 +198,7 @@ def main(argv=None) -> None:
     s.add_argument("--devices", type=int, default=10)
     s.add_argument("--max-scans", type=int, default=8)
     s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--kind", default="PvP", choices=["PvP", "PvT", "tiebar"])
     s.set_defaults(fn=cmd_navigate)
 
     s = sub.add_parser("schema", help="print the chargecell/1 JSON Schema")

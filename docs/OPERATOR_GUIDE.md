@@ -4,9 +4,29 @@ This guide is for the person at the fridge. No programming needed.
 
 ## Before the first use
 
-ChargeCell needs a trained model. If "No model yet" shows at the bottom of the sidebar, go to
-**Synthetic data**, generate about 3000 scans, then **Train** a model on them (see "Making a
-better model" below). This takes a while on a laptop; it only has to be done once.
+ChargeCell ships starter models trained on simulated scans, installed on first start. The
+sidebar lists which scan kinds have a model. If one is missing, go to **Synthetic data**,
+generate about 3000 scans of that kind, then **Train** a model on them (see "Making a better
+model" below).
+
+On the **Device** page, fill in what you know: gate names (P plungers, X exchange gates,
+T tunnel gates, M sensor), safe limits, the largest step you allow. Everything is optional and
+ChargeCell assumes no voltage scale: without limits it warns you, without a step limit it moves
+at most one window at a time.
+
+## Three kinds of scan
+
+ChargeCell reads the three scans of an exchange-only tune-up, in this order:
+
+1. **Plunger vs tunnel gate (PvT)**, for each edge dot: sweep the plunger against the tunnel gate
+   between the dot and its reservoir. ChargeCell finds where electrons load cleanly and where the
+   dot holds exactly one electron.
+2. **Plunger vs plunger (PvP)**, for each pair: find the (1,1) cell (the main loop below).
+3. **Tie bar**: a plunger-plunger zoom on the (1,1)-(2,0) transition, which ChargeCell suggests
+   once (1,1) is found. It marks the two triple points, measures the coupling between the dots
+   and suggests a first readout point.
+
+When you import a file, pick its kind (or put `"kind"` in the request from your software).
 
 ## The daily loop
 
@@ -30,13 +50,27 @@ shows the move. The panel lists exact voltages. "Confidence: high" means the mov
 from lines visible in this scan. "Medium" or "low" means ChargeCell is exploring: it moves by
 three quarters of a window so the new scan overlaps the old one.
 
+**Green (plunger vs tunnel gate): one-electron point found.** Blue lines mark the loading lines
+(0->1, 1->2, ...); the green cross is the suggested plunger and tunnel-gate setting for one
+electron. The panel gives the tunnel-gate range where electrons load cleanly. Below it the lines
+fade and jump sideways (the tunnel gate is too closed for electrons to follow the sweep); above
+it they smear out (the dot is barely separated from its reservoir).
+
+**Green (tie bar): tie bar found.** The teal dots are the two triple points, the green bar joins
+them, and the green cross is a first guess for the spin-to-charge readout point, just past the
+transition on the (2,0) side. The coupling ratio (width of the transition divided by the length
+of the tie bar) measures how strongly the two dots are coupled without needing any calibration.
+If you give lever arms and the electron temperature on the Device page, it is also shown in µeV
+and GHz. If you set a target range for the ratio, ChargeCell tells you which way to move the
+exchange gate.
+
 **Red: can't interpret this scan.** Fix the problem named in the panel, then rescan the same window.
 
 | Problem | Usual fix |
 |---|---|
 | Too noisy | Retune the sensor to its steepest flank; average longer (4x the time halves the noise). |
 | Sensor lost sensitivity | Sweep the sensor gate across its Coulomb peak and park it on the steepest flank. Check sensor compensation is on. |
-| Dots merged | Lower the barrier gate between the two dots a little (default 10 mV) and rescan. |
+| Dots merged | Lower the exchange gate between the two dots a little (the panel says how much) and rescan. |
 | Charge jumps | Wait a few minutes after big moves; rescan; avoid large steps. |
 | Too few points | Rescan with the number of points shown. |
 
@@ -93,6 +127,10 @@ Real-data scores appear once you have labelled scans from at least two cooldowns
 
 ## Practising
 
-**New practice device** creates a simulated triple dot with its own quirks. Scan it, follow the
-advice with **Measure it on the practice device**, and use **Reveal the true answer** to check.
-It is a safe way to learn the workflow and to see how the guidance behaves.
+**New practice device** creates a simulated triple dot with its own quirks, for the scan kind you
+choose next to the button. Its gates respond like a real device: the tunnel gates T1 and T2
+decide whether P1 and P3 load electrons, and the exchange gates X1 and X2 set how strongly the
+dots couple. Scan it, follow the advice with **Measure it on the practice device** (or **Take the
+tie-bar scan** once (1,1) is found), and use **Reveal the true answer** to check. It is a safe way
+to learn the workflow and to see how the guidance behaves. Practice devices come in very
+different voltage scales on purpose.

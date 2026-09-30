@@ -57,6 +57,12 @@ const STATUS_LABEL = {
   NOT_IN_WINDOW: "(1,1) not in this window",
   UNINTERPRETABLE: "Can't interpret this scan",
 };
+const KIND_STATUS_LABEL = {
+  PvT: { FOUND: "One-electron point found", NOT_IN_WINDOW: "Not in this window", UNINTERPRETABLE: "Can't interpret this scan" },
+  tiebar: { FOUND: "Tie bar found", NOT_IN_WINDOW: "Tie bar not in this window", UNINTERPRETABLE: "Can't interpret this scan" },
+};
+const statusLabel = (kind, st) => (KIND_STATUS_LABEL[kind] || STATUS_LABEL)[st];
+const KIND_LABEL = { PvP: "Plunger vs plunger", PvT: "Plunger vs tunnel gate", tiebar: "Tie bar (zoom on (1,1)-(2,0))" };
 const SHORT_STATUS = { FOUND: "Found", NOT_IN_WINDOW: "Not in window", UNINTERPRETABLE: "Uninterpretable" };
 const REASON_LABEL = {
   none: "(1,1) visible and anchored",
@@ -69,6 +75,9 @@ const REASON_LABEL = {
   dots_merged: "Dots merged (one-dot pattern)",
   charge_instability: "Charge jumps between sweeps",
   resolution_too_coarse: "Too few points",
+  tunnel_rate_too_low: "Tunnel gate too closed",
+  reservoir_too_open: "Tunnel gate too open",
+  no_tiebar: "No tie bar in view",
 };
 const REASONS_BY_STATUS = {
   FOUND: ["none"],
@@ -277,14 +286,17 @@ pages.review = {
     const r = this.analysis;
     this.occ = this.lines = this.labels = null;
     this.plot.extra = null;
-    if (!r || !r.overlays) return;
+    if (!r) return;
     const o = r.overlays;
-    const code = decodeU8(o.occ_code);
-    this.occ = codeImage(code, o.size, o.size);
-    this.labels = codeLabels(code, o.size, o.size, o.extent);
-    this.lines = linesImage(o.lines, o.size);
+    if (o && o.occ_code) {
+      const code = decodeU8(o.occ_code);
+      this.occ = codeImage(code, o.size, o.size);
+      this.labels = codeLabels(code, o.size, o.size, o.extent);
+      this.lines = linesImage(o.lines, o.size);
+    }
     const rec = r.recommendation || {};
-    const w = rec.next_window && rec.kind !== "fix_then_rescan" ? rec.next_window : rec.tiebar_window;
+    const w0 = rec.next_window && rec.kind !== "fix_then_rescan" ? rec.next_window : (rec.tiebar_window || rec.retune_window);
+    const w = w0 ? onAxes(w0, this.scan) : null;
     if (w) {
       let ext = [Math.min(w.x[0], this.scan.x[0]), Math.max(w.x[1], this.scan.x[this.scan.nx - 1]),
                  Math.min(w.y[0], this.scan.y[0]), Math.max(w.y[1], this.scan.y[this.scan.ny - 1])];
@@ -303,12 +315,13 @@ pages.review = {
       const [X0, Y0] = plot.toScreen(x0, y1), [X1, Y1] = plot.toScreen(x1, y0);
       ctx.strokeStyle = "#17202B"; ctx.lineWidth = 1; ctx.strokeRect(X0, Y0, X1 - X0, Y1 - Y0);
     }
-    if (!r || !r.overlays) return;
+    if (!r) return;
+    drawFeatures(ctx, plot, r, sc);
     if (this.show.cells && this.occ) {
       plot.drawGridImage(this.occ, r.overlays.extent);
       drawCodeLabels(ctx, plot, this.labels);
     }
-    if (this.show.lines && this.lines) plot.drawGridImage(this.lines, r.overlays.extent);
+    if (this.show.lines && this.lines && r.overlays) plot.drawGridImage(this.lines, r.overlays.extent);
     if (r.cell && r.cell.polygon_v && r.status === "FOUND") {
       ctx.strokeStyle = "#2E5AAC"; ctx.lineWidth = 2.5; ctx.beginPath();
       r.cell.polygon_v.forEach(([x, y], k) => { const [X, Y] = plot.toScreen(x, y); k ? ctx.lineTo(X, Y) : ctx.moveTo(X, Y); });
@@ -328,7 +341,7 @@ pages.review = {
     }
     const rec = r.recommendation || {};
     if (!this.show.next) return;
-    const w = rec.next_window && rec.kind !== "fix_then_rescan" ? rec.next_window : null;
+    const w = rec.next_window && rec.kind !== "fix_then_rescan" ? onAxes(rec.next_window, sc) : null;
     if (w) {
       const col = rec.kind === "explore" ? "#A86400" : "#2E5AAC";
       dashedRect(ctx, plot, w.x[0], w.x[1], w.y[0], w.y[1], col, rec.kind === "explore" ? "Explore here next" : "Next scan");
@@ -341,8 +354,8 @@ pages.review = {
       }
     }
     if (rec.tiebar_window) {
-      const t = rec.tiebar_window;
-      dashedRect(ctx, plot, t.x[0], t.x[1], t.y[0], t.y[1], "#1D7A4C", "Readout zoom");
+      const t = onAxes(rec.tiebar_window, sc);
+      dashedRect(ctx, plot, t.x[0], t.x[1], t.y[0], t.y[1], "#1D7A4C", "Tie-bar scan");
     }
   },
 
@@ -379,20 +392,20 @@ pages.review = {
       h("span", { class: "muted small" }, `Confidence ${pct(r.confidence)}`),
       r.needs_review ? h("span", { class: "flag review", title: "The model is unsure or its checks disagreed. A person should look." }, "Needs review") : h("span", { class: "flag ok" }, "Checks passed"));
     const decision = h("div", { class: `panel decision ${r.status}` },
-      h("div", { class: `status-word status-${r.status}` }, STATUS_LABEL[r.status]),
+      h("div", { class: `status-word status-${r.status}` }, statusLabel(r.kind, r.status)),
       h("p", {}, r.reason_text), flags,
       (r.demotion && r.demotion.length) ? h("p", { class: "warn small" }, "Held back from FOUND because " + r.demotion.join("; ") + ".") : null);
 
     const todo = h("div", { class: "panel" }, h("h2", {}, "What to do next"),
       h("p", { class: "headline" }, rec.headline || ""),
       rec.steps && rec.steps.length ? h("ul", { class: "steps" }, rec.steps.map(s => h("li", {}, s))) : null);
-    const win = rec.next_window || rec.tiebar_window;
+    const win = rec.next_window || rec.tiebar_window || rec.retune_window;
     if (win) {
-      const key = rec.next_window ? "next_window" : "tiebar_window";
+      const key = rec.next_window ? "next_window" : rec.tiebar_window ? "tiebar_window" : "retune_window";
       const row = (g, a) => h("tr", {}, h("td", {}, h("b", {}, g)), h("td", { class: "num" }, V4(a[0])), h("td", {}, "to"),
         h("td", { class: "num" }, V4(a[1])), h("td", {}, "V"), h("td", { class: "num muted" }, `${a[2]} pts`));
       todo.append(h("div", { class: "window-box" },
-        h("div", { class: "muted small" }, key === "tiebar_window" ? "Readout zoom window" : "Next scan window"),
+        h("div", { class: "muted small" }, { tiebar_window: "Tie-bar scan window (readout setup)", retune_window: "Rescan after changing the exchange gate" }[key] || "Next scan window"),
         h("table", {}, row(win.x_gate, win.x), row(win.y_gate, win.y))),
         h("div", { class: "row", style: "margin-top:10px" },
           h("button", { onclick: () => {
@@ -400,7 +413,7 @@ pages.review = {
             navigator.clipboard.writeText(txt).then(() => toast("Scan settings copied"));
           } }, "Copy settings"),
           h("a", { class: "button", href: `/api/v1/scans/${encodeURIComponent(this.id)}/response?download=true`, title: "The result in the chargecell/1 format your measurement code can read" }, "Download result (JSON)"),
-          meta.source === "virtual_device" && rec.next_window ? h("button", { class: "primary", onclick: e => this.runNext(e) }, "Measure it on the practice device") : null));
+          meta.source === "virtual_device" ? h("button", { class: "primary", onclick: e => this.runNext(e, key) }, key === "tiebar_window" ? "Take the tie-bar scan on the practice device" : "Measure it on the practice device") : null));
     }
     if (rec.warnings && rec.warnings.length) todo.append(h("div", { style: "margin-top:10px" }, rec.warnings.map(w => h("p", { class: "warn" }, w))));
     if (rec.confidence) todo.append(h("p", { class: "muted small", style: "margin-top:8px" }, `Guidance confidence: ${rec.confidence}. Basis: ${rec.basis || "n/a"}.`));
@@ -409,7 +422,10 @@ pages.review = {
       r.spectators.map(sp => h("div", {}, h("b", {}, sp.gate), ` at ${sp.voltage != null ? V4(sp.voltage) + " V" : "unknown voltage"}: `,
         sp.status === "verified" ? h("span", { class: "flag ok" }, "one electron (consistent with an earlier scan)") : h("span", { class: "flag" }, sp.status)))) : null;
 
-    const teach = h("div", { class: "panel" }, h("h2", {}, "Teach the model"),
+    const teach = (r.kind || "PvP") !== "PvP" ? h("div", { class: "panel small" }, h("h2", {}, "Teach the model"),
+      h("p", { class: "small muted" }, `Labelling ${KIND_LABEL[r.kind] || r.kind} scans in the GUI is not available yet. Labelled scans can be sent with the ChargeCell API (docs/PROTOCOL.md).`),
+      meta.source === "virtual_device" ? h("button", { onclick: e => this.reveal(e) }, "Reveal the true answer") : null) :
+      h("div", { class: "panel" }, h("h2", {}, "Teach the model"),
       h("p", { class: "small muted" }, "Your corrections become training data. Accept the result if it is right, or fix it in the labeller."),
       h("div", { class: "row" },
         h("button", { onclick: () => this.accept() }, "Accept as label"),
@@ -420,24 +436,29 @@ pages.review = {
       h("div", { class: "probs", style: "margin-top:10px" },
         Object.entries(r.probabilities.status).map(([k, v]) => [h("span", {}, SHORT_STATUS[k]), h("div", { class: "bar" }, h("i", { style: `width:${v * 100}%` })), h("span", {}, pct(v))])),
       h("p", { class: "small muted", style: "margin-top:8px" },
-        `Empty region visible: ${meta.x_gate} ${pct(r.probabilities.ref[0])}, ${meta.y_gate} ${pct(r.probabilities.ref[1])}. `,
+        (r.probabilities.ref || []).length === 2 ? `Empty region visible: ${meta.x_gate} ${pct(r.probabilities.ref[0])}, ${meta.y_gate} ${pct(r.probabilities.ref[1])}. ` :
+          (r.probabilities.ref || []).length === 1 ? `Empty dot visible: ${pct(r.probabilities.ref[0])}. ` : "",
         `Ensemble disagreement ${r.uncertainty.mutual_info}. FOUND threshold ${r.found_threshold}. Model ${shortId(r.model_id)}.`),
       r.quality && r.quality.warnings.length ? h("p", { class: "warn small" }, r.quality.warnings.join(" ")) : null) : null;
     side.replaceChildren(decision, todo, specs, teach, probs, info);
   },
 
-  async runNext(e) {
+  async runNext(e, key = "next_window") {
     e.target.disabled = true;
     try {
-      const d = await api(`/api/scans/${encodeURIComponent(this.id)}/run_next`, { method: "POST" });
+      const d = await api(`/api/scans/${encodeURIComponent(this.id)}/run_next?window=${key}`, { method: "POST" });
       toast("Measured and analysed the next scan");
       go("review", d.scan_id);
     } finally { e.target.disabled = false; }
   },
   async reveal(e) {
     const t = await api(`/api/scans/${encodeURIComponent(this.id)}/truth`);
-    const tgt = t.target_V ? ` The (1,1) centre is at ${this.scan.xLabel} = ${V4(t.target_V[0])} V, ${this.scan.yLabel} = ${V4(t.target_V[1])} V.` : "";
-    e.target.replaceWith(h("p", { class: "small" }, h("b", {}, "Truth: "), `${STATUS_LABEL[t.status]} (${REASON_LABEL[t.reason]}).${tgt} Spectator holds ${t.spectator_occupancy} electron(s).`));
+    const kind = this.scan.meta.kind || "PvP", xg = this.scan.xLabel, yg = this.scan.yLabel;
+    let more = "";
+    if (t.target_V) more = ` The (1,1) centre is at ${xg} = ${V4(t.target_V[0])} V, ${yg} = ${V4(t.target_V[1])} V. Spectator holds ${t.spectator_occupancy} electron(s).`;
+    if (t.operating_point_V) more = ` One electron at plunger ${V4(t.operating_point_V[0])} V, tunnel gate ${V4(t.operating_point_V[1])} V; electrons load cleanly for the tunnel gate between ${V4(t.T_open_V)} and ${V4(t.T_broad_V)} V.`;
+    if (t.tp_low_V) more = ` Triple points at (${V4(t.tp_low_V[0])}, ${V4(t.tp_low_V[1])}) and (${V4(t.tp_high_V[0])}, ${V4(t.tp_high_V[1])}) V; coupling ratio ${t.coupling_ratio.toFixed(2)}.`;
+    e.target.replaceWith(h("p", { class: "small" }, h("b", {}, "Truth: "), `${statusLabel(kind, t.status)} (${REASON_LABEL[t.reason] || t.reason}).${more}`));
   },
   async accept() {
     const r = this.analysis;
@@ -449,9 +470,57 @@ pages.review = {
   },
 };
 
-async function startPractice() {
-  const d = await api("/api/virtual", { method: "POST", json: {} });
-  toast(`Practice device ${d.device} created. Its first scan is ready.`);
+/* A window {x_gate, y_gate, x, y} on the scan's own axes (PvT analyses may be transposed). */
+function onAxes(w, sc) {
+  return w.x_gate === sc.xLabel ? w : { ...w, x_gate: w.y_gate, y_gate: w.x_gate, x: w.y, y: w.x };
+}
+
+/* Keypoints of PvT and tie-bar results (points are gate -> V, polylines are on the analysis axes). */
+function drawFeatures(ctx, plot, r, sc) {
+  const feats = r.features || [];
+  if (!feats.length) return;
+  const swap = r.scan && r.scan.x_gate !== sc.xLabel;
+  const pt = (x, y) => swap ? plot.toScreen(y, x) : plot.toScreen(x, y);
+  const at = p => plot.toScreen(p[sc.xLabel], p[sc.yLabel]);
+  for (const f of feats) {
+    if (f.polyline && f.polyline.length > 1) {
+      ctx.strokeStyle = f.type === "tie_bar" ? "#1D7A4C" : FAMILY_COLOR.a;
+      ctx.lineWidth = f.type === "tie_bar" ? 3.5 : 2;
+      ctx.beginPath();
+      f.polyline.forEach(([x, y], k) => { const [X, Y] = pt(x, y); k ? ctx.lineTo(X, Y) : ctx.moveTo(X, Y); });
+      ctx.stroke();
+      if (f.type === "loading_line") {
+        const [X, Y] = pt(...f.polyline[f.polyline.length - 1]);
+        ctx.font = "12px system-ui, sans-serif"; ctx.fillStyle = "#fff";
+        ctx.fillRect(X + 4, Y - 14, ctx.measureText(f.label).width + 6, 16);
+        ctx.fillStyle = FAMILY_COLOR.a; ctx.fillText(f.label, X + 7, Y - 2);
+      }
+    }
+    if (f.type === "triple_point") {
+      const [X, Y] = at(f.point);
+      ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(X, Y, 6, 0, 2 * Math.PI); ctx.fill();
+      ctx.fillStyle = "#13808A"; ctx.beginPath(); ctx.arc(X, Y, 4, 0, 2 * Math.PI); ctx.fill();
+    }
+    if (f.type === "operating_point" || f.type === "readout_point") {
+      const [X, Y] = at(f.point);
+      ctx.strokeStyle = "#fff"; ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.moveTo(X - 9, Y); ctx.lineTo(X + 9, Y); ctx.moveTo(X, Y - 9); ctx.lineTo(X, Y + 9); ctx.stroke();
+      ctx.strokeStyle = "#1D7A4C"; ctx.lineWidth = 2; ctx.stroke();
+      ctx.beginPath(); ctx.arc(X, Y, 7, 0, 2 * Math.PI); ctx.stroke();
+    }
+  }
+}
+
+/* "New practice device" with a choice of scan kind. */
+function practiceButtons() {
+  const kind = h("select", { "aria-label": "Practice scan kind", title: "What to practise" },
+    ...Object.entries(KIND_LABEL).map(([k, t]) => h("option", { value: k }, t)));
+  return h("span", { class: "row", style: "gap:6px" }, h("button", { onclick: () => startPractice(kind.value) }, "New practice device"), kind);
+}
+
+async function startPractice(kind = "PvP") {
+  const d = await api("/api/virtual", { method: "POST", json: { kind } });
+  toast(`Practice device ${d.device} created. Its first ${KIND_LABEL[kind] || kind} scan is ready.`);
   await loadScanList();
   go("review", d.scan_id);
 }
@@ -509,6 +578,13 @@ pages.label = {
     this.id = id;
     this.picker.update(id);
     this.scan = await getScan(id);
+    if ((this.scan.meta.kind || "PvP") !== "PvP") {
+      this.ann = null; this.cells = null; this.cellLabels = null;
+      this.plot.setScan(this.scan);
+      this.side.replaceChildren(h("div", { class: "panel" }, h("h2", {}, "Not available yet"),
+        h("p", {}, `This is a ${KIND_LABEL[this.scan.meta.kind] || this.scan.meta.kind} scan. The labeller draws plunger-vs-plunger labels only; labels for this kind can be sent with the ChargeCell API (docs/PROTOCOL.md).`)));
+      return;
+    }
     const d = await api(`/api/scans/${encodeURIComponent(id)}/annotation`);
     this.ann = d.annotation;
     if (!this.ann.annotator) this.ann.annotator = annotatorName();
@@ -661,6 +737,7 @@ pages.label = {
   },
 
   drawLayers(ctx, plot) {
+    if (!this.ann) return;
     if (this.showCells && this.cells) {
       plot.drawGridImage(this.cells, this.cellExtent);
       drawCodeLabels(ctx, plot, this.cellLabels || []);
@@ -786,7 +863,7 @@ pages.label = {
 pages.scans = {
   build() {
     const root = $("#page-scans");
-    this.filters = { device: "", labelled: "", source: "" };
+    this.filters = { device: "", labelled: "", source: "", kind: "" };
     this.importPanel = this.buildImport();
     this.importPanel.hidden = true;
     this.table = h("div", { class: "table-wrap" });
@@ -794,7 +871,7 @@ pages.scans = {
     root.append(
       h("header", {}, h("h1", {}, "Scans"),
         h("button", { class: "primary", onclick: () => { this.importPanel.hidden = !this.importPanel.hidden; } }, "Import files"),
-        h("button", { onclick: () => startPractice() }, "New practice device"),
+        practiceButtons(),
         h("button", { onclick: () => this.analyzeAll() }, "Analyse all new scans")),
       this.importPanel, this.filterBar, this.table);
   },
@@ -814,6 +891,8 @@ pages.scans = {
         field("Device", h("input", { value: "default" }), "device"),
         field("Cooldown", h("input", { placeholder: "e.g. CD7" }), "cooldown"),
         field("Voltages in file", h("select", {}, h("option", { value: "V" }, "volts"), h("option", { value: "mV" }, "millivolts")), "axis_units"),
+        field("Scan kind", h("select", { title: "PvT: the plunger on one axis and its reservoir tunnel gate on the other. Tie bar: a plunger-plunger zoom on the (1,1)-(2,0) transition." },
+          h("option", { value: "" }, "from file (else plunger vs plunger)"), ...Object.entries(KIND_LABEL).map(([k, t]) => h("option", { value: k }, t))), "kind"),
         field("Notes", h("input", {}), "notes")),
       h("p", { class: "small muted", style: "margin:0" }, "Always fill in the cooldown: training keeps each device and cooldown on one side of the train/test split so the scores stay honest."),
       h("div", { class: "row" }, h("button", { class: "primary", onclick: async e => {
@@ -843,13 +922,14 @@ pages.scans = {
       sel("device", [["", "All devices"], ...devices.map(d => [d, d])], "Device"),
       sel("labelled", [["", "All"], ["yes", "Labelled"], ["no", "Not labelled"]], "Label"),
       sel("source", [["", "All sources"], ["api", "Sent by API"], ["file", "Other files"], ["virtual_device", "Practice devices"]], "Source"),
+      sel("kind", [["", "All kinds"], ...Object.keys(KIND_LABEL).map(k => [k, k])], "Kind"),
       h("span", { class: "muted small" }, `${S.scans.length} scans`));
     this.renderTable();
   },
   renderTable() {
     const f = this.filters;
     const rows = S.scans.filter(s => (!f.device || s.device === f.device) &&
-      (!f.source || s.source === f.source) &&
+      (!f.source || s.source === f.source) && (!f.kind || (s.kind || "PvP") === f.kind) &&
       (!f.labelled || (f.labelled === "yes") === !!(s.label && s.label.status)));
     if (!S.scans.length) {
       this.table.replaceChildren(h("div", { class: "empty" }, h("h2", {}, "No scans yet"),
@@ -857,12 +937,13 @@ pages.scans = {
       return;
     }
     this.table.replaceChildren(h("table", { class: "list" },
-      h("thead", {}, h("tr", {}, ["Measured", "Gates", "Device", "Source", "Label", "Model says", ""].map(t => h("th", {}, t)))),
+      h("thead", {}, h("tr", {}, ["Measured", "Gates", "Kind", "Device", "Source", "Label", "Model says", ""].map(t => h("th", {}, t)))),
       h("tbody", {}, rows.map(s => {
         const a = s.analysis, l = s.label;
         return h("tr", { class: "click", onclick: e => { if (e.target.tagName !== "BUTTON") go("review", s.id); } },
           h("td", {}, when(s.created), h("div", { class: "id" }, shortId(s.id))),
           h("td", {}, `${s.x_gate} / ${s.y_gate}`, h("div", { class: "id" }, `${(s.shape || [])[1]} x ${(s.shape || [])[0]}`)),
+          h("td", {}, s.kind || "PvP"),
           h("td", {}, s.device, s.cooldown ? h("div", { class: "id" }, s.cooldown) : null),
           h("td", {}, { api: "API", file: "file", virtual_device: "practice", synthetic: "synthetic" }[s.source] || s.source),
           h("td", {}, l && l.status ? h("span", { class: `pill ${l.status}` }, SHORT_STATUS[l.status]) : h("span", { class: "muted" }, "none"),
@@ -870,7 +951,7 @@ pages.scans = {
           h("td", {}, a ? [h("span", { class: `pill ${a.status}` }, SHORT_STATUS[a.status]), " ", h("span", { class: "muted small" }, pct(a.confidence || 0)),
             a.needs_review ? h("div", {}, h("span", { class: "flag review" }, "Needs review")) : null] : h("span", { class: "muted" }, "not analysed")),
           h("td", {}, h("div", { class: "row", style: "flex-wrap:nowrap" },
-            h("button", { onclick: () => go("label", s.id) }, "Label"),
+            (s.kind || "PvP") === "PvP" ? h("button", { onclick: () => go("label", s.id) }, "Label") : null,
             h("button", { class: "danger", onclick: async () => {
               if (!confirm("Delete this scan, its label and analysis?")) return;
               await api(`/api/scans/${encodeURIComponent(s.id)}`, { method: "DELETE" });
@@ -891,6 +972,7 @@ pages.synthetic = {
     const root = $("#page-synthetic");
     const f = this.f = {
       name: h("input", { value: "sim-" + new Date().toISOString().slice(0, 10) }),
+      kind: h("select", {}, Object.entries(KIND_LABEL).map(([k, t]) => h("option", { value: k }, t))),
       n: h("input", { type: "number", min: 50, step: 50, value: 3000 }),
       size: h("select", {}, [64, 96, 128].map(v => h("option", { value: v, selected: v === 96 }, `${v} x ${v}`))),
       preset: h("select", {}, h("option", { value: "mixed" }, "Mixed linear and triangular"),
@@ -909,8 +991,8 @@ pages.synthetic = {
         h("div", { class: "panel stack" },
           h("h2", { style: "margin:0" }, "Generate a dataset"),
           h("p", { class: "small muted", style: "margin:0" },
-            "Simulated triple-dot scans with exact labels: constant-interaction model with tunnel coupling, a charge sensor that can drift off its flank, 1/f and telegraph noise, charge jumps and latching. The outcome mix controls how often each case is aimed for; final labels come from the physics."),
-          h("div", { class: "fields" }, L("Name", f.name), L("Number of scans", f.n), L("Image size", f.size), h("label", { class: "wide" }, "Device style", f.preset)),
+            "Simulated triple-dot scans with exact labels: constant-interaction model with tunnel coupling, a charge sensor that can drift off its flank, 1/f and telegraph noise, charge jumps and latching; for plunger-vs-tunnel-gate scans also the reservoir tunnel rate (slow: lines latch and vanish; fast: lines smear). The outcome mix controls how often each case is aimed for; final labels come from the physics."),
+          h("div", { class: "fields" }, L("Name", f.name), h("label", { class: "wide" }, "Scan kind", f.kind), L("Number of scans", f.n), L("Image size", f.size), h("label", { class: "wide" }, "Device style", f.preset)),
           h("div", { class: "fields" }, L("Aim: found (%)", f.found), L("Aim: not in window (%)", f.notin), L("Aim: uninterpretable (%)", f.bad)),
           h("div", { class: "fields" }, L("Worker processes", f.workers), L("Random seed", f.seed)),
           h("p", { class: "small muted", style: "margin:0" }, "Image size must match the model you train. Roughly 15 scans per second per worker."),
@@ -926,7 +1008,7 @@ pages.synthetic = {
       const c = d.counts || {}, tot = Object.values(c).reduce((a, b) => a + b, 0) || 1;
       const by = st => Object.entries(c).filter(([k]) => k.startsWith(st)).reduce((a, [, v]) => a + v, 0);
       return h("div", { class: "panel small" },
-        h("div", { class: "row" }, h("b", {}, d.name), h("span", { class: "muted" }, `${d.n} scans, ${d.size}px, ${d.preset}`), h("span", { class: "spacer" }),
+        h("div", { class: "row" }, h("b", {}, d.name), h("span", { class: "muted" }, `${d.kind || "PvP"}, ${d.n} scans, ${d.size}px, ${d.preset}`), h("span", { class: "spacer" }),
           h("button", { onclick: () => this.showPreview(d.name) }, "Preview"),
           h("button", { class: "danger", onclick: async () => { if (confirm(`Delete dataset ${d.name}?`)) { await api(`/api/synthetic/${d.name}`, { method: "DELETE" }); this.refresh(); } } }, "Delete")),
         h("div", { class: "countbar", title: "found / not in window / uninterpretable" },
@@ -940,7 +1022,7 @@ pages.synthetic = {
     const f = this.f, tot = +f.found.value + +f.notin.value + +f.bad.value;
     if (tot <= 0) { toast("The outcome mix must add up to more than 0.", "error"); return; }
     await api("/api/synthetic", { method: "POST", json: {
-      name: f.name.value, n: +f.n.value, size: +f.size.value, preset: f.preset.value, seed: +f.seed.value,
+      name: f.name.value, kind: f.kind.value, n: +f.n.value, size: +f.size.value, preset: f.preset.value, seed: +f.seed.value,
       workers: +f.workers.value, mix: [f.found.value / tot, f.notin.value / tot, f.bad.value / tot] } });
     toast("Generating in the background. Progress shows in the sidebar.");
     f.seed.value = Math.floor(Math.random() * 1e6);
@@ -959,7 +1041,7 @@ pages.synthetic = {
       ctx.putImageData(img, 0, 0);
       const m = it.meta;
       return h("div", { class: "thumb" }, c, h("div", { class: "cap" }, h("span", { class: `pill ${m.status}` }, SHORT_STATUS[m.status]),
-        h("div", { class: "muted" }, REASON_LABEL[m.reason]), h("div", { class: "muted" }, `dots ${m.pair.join("-")}, ${m.artifact}`)));
+        h("div", { class: "muted" }, REASON_LABEL[m.reason] || m.reason), h("div", { class: "muted" }, `${m.pair ? "dots " + m.pair.join("-") : "dot " + ((m.dot ?? 0) + 1)}, ${m.artifact}`)));
     })));
   },
 };
@@ -969,6 +1051,7 @@ pages.train = {
   build() {
     const root = $("#page-train");
     const f = this.f = {
+      kind: h("select", { onchange: () => this.renderDatasets() }, Object.entries(KIND_LABEL).map(([k, t]) => h("option", { value: k }, t))),
       size: h("select", { onchange: () => this.renderDatasets() }, [64, 96, 128].map(v => h("option", { value: v, selected: v === 96 }, `${v} x ${v}`))),
       use_real: h("input", { type: "checkbox", checked: true }),
       only_reviewed: h("input", { type: "checkbox" }),
@@ -989,7 +1072,8 @@ pages.train = {
       h("div", { class: "two-col" },
         h("div", { class: "panel stack" },
           h("h2", { style: "margin:0" }, "Train a new model version"),
-          L("Image size", f.size),
+          h("p", { class: "small muted", style: "margin:0" }, "Each scan kind has its own model: plunger vs plunger finds (1,1), plunger vs tunnel gate loads one electron, the tie bar sets up readout."),
+          L("Scan kind", f.kind), L("Image size", f.size),
           h("div", {}, h("div", { class: "small muted" }, "Synthetic datasets"), this.dsBox),
           h("label", { class: "check" }, f.use_real, h("span", { id: "real-count" }, "Include labelled real scans")),
           h("label", { class: "check" }, f.only_reviewed, "Only labels with a second check"),
@@ -1011,16 +1095,16 @@ pages.train = {
     this.watch();
   },
   renderDatasets() {
-    const size = +this.f.size.value;
-    const ok = (this.datasets || []).filter(d => d.size === size);
+    const size = +this.f.size.value, kind = this.f.kind.value;
+    const ok = (this.datasets || []).filter(d => d.size === size && (d.kind || "PvP") === kind);
     this.dsBox.replaceChildren(...(ok.length ? ok.map(d => h("label", { class: "check" },
       h("input", { type: "checkbox", value: d.name, checked: true }), `${d.name} (${d.n} scans)`)) :
-      [h("p", { class: "small muted", style: "margin:0" }, `No ${size}px datasets. Generate one on the Synthetic data page, or pick another size.`)]));
+      [h("p", { class: "small muted", style: "margin:0" }, `No ${size}px ${kind} datasets. Generate one on the Synthetic data page, or pick another size.`)]));
   },
   async start() {
     const f = this.f;
     const synthetic = [...this.dsBox.querySelectorAll("input:checked")].map(i => i.value);
-    const body = { synthetic, size: +f.size.value, use_real: f.use_real.checked, only_reviewed: f.only_reviewed.checked,
+    const body = { synthetic, kind: f.kind.value, size: +f.size.value, use_real: f.use_real.checked, only_reviewed: f.only_reviewed.checked,
       real_weight: +f.real_weight.value, epochs: +f.epochs.value, ensemble: +f.ensemble.value, base: +f.base.value,
       batch_size: +f.batch_size.value, lr: +f.lr.value, target_precision: +f.target_precision.value, notes: f.notes.value };
     const job = await api("/api/train", { method: "POST", json: body });
@@ -1059,7 +1143,7 @@ pages.train = {
       const block = (name, x) => x ? h("div", {}, h("h3", {}, name === "real" ? `Held-out real scans (${x.n})` : `Held-out synthetic scans (${x.n})`),
         h("div", { class: "metric-grid" },
           h("div", { class: "metric" }, h("b", {}, pct(x.found_precision)), h("span", {}, "FOUND calls that are right")),
-          h("div", { class: "metric" }, h("b", {}, pct(x.found_recall)), h("span", {}, "true (1,1) windows found")),
+          h("div", { class: "metric" }, h("b", {}, pct(x.found_recall)), h("span", {}, "true FOUND windows found")),
           h("div", { class: "metric" }, h("b", {}, pct(x.status_accuracy)), h("span", {}, "outcome correct")),
           h("div", { class: "metric" }, h("b", {}, pct(x.occupancy_pixel_accuracy)), h("span", {}, "electron count per pixel"))),
         h("details", {}, h("summary", {}, "Confusion matrix and line scores"),
@@ -1068,7 +1152,7 @@ pages.train = {
             x.confusion.map((row, i) => h("tr", {}, h("td", {}, SHORT_STATUS[x.confusion_labels[i]]), row.map(v => h("td", {}, v))))),
           h("p", { class: "small" }, "Line F1: " + Object.entries(x.line_f1).map(([k, v]) => `${k} ${v}`).join(", ")))) : null;
       return h("div", { class: "panel" },
-        h("div", { class: "row" }, h("b", {}, shortId(m.id)), h("span", { class: "muted small" }, when(m.created)),
+        h("div", { class: "row" }, h("b", {}, shortId(m.id)), h("span", { class: "pill" }, m.kind || "PvP"), h("span", { class: "muted small" }, when(m.created)),
           m.active ? h("span", { class: "flag ok" }, "Active") : h("button", { onclick: async () => { await api(`/api/models/${m.id}/activate`, { method: "POST" }); toast("Model activated"); this.refresh(); pollStatus(); } }, "Make active"),
           h("span", { class: "spacer" }),
           h("span", { class: "small muted" }, `${m.config.ensemble} members, ${m.config.size}px, ${m.data.n_train} training scans (${m.data.n_real_train} real), FOUND threshold ${m.found_threshold}`)),
@@ -1209,7 +1293,8 @@ async function pollStatus() {
     }
   }
   S.running = new Set(running.map(j => j.id));
-  $("#model-indicator").textContent = st.active_model ? `Model ${shortId(st.active_model)}` : "No model yet";
+  const act = Object.keys(st.active_models || {});
+  $("#model-indicator").textContent = act.length ? `Models: ${act.join(", ")}` : "No model yet";
 }
 
 async function route() {

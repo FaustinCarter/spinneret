@@ -2,11 +2,14 @@
 
     python scripts/eval_model.py --model-dir starter_ws/models/<id> [--n 300] [--nav 20]
 
+Works for every scan kind (read from the model card):
 1. Held-out synthetic scans generated fresh (seed 2027, never seen in training): confusion
    matrix of the final decision, FOUND precision/recall, fraction flagged for review.
-2. Closed-loop navigation on simulated practice devices: start at a random point, follow the
-   recommended next window until FOUND or --max-scans. A FOUND is "correct" if the reported
-   cell centre is within 0.4 addition voltages of the true (1,1) centre on both gates.
+2. Closed loop on simulated practice devices: follow the recommended next window until FOUND
+   or --max-scans. A FOUND is "correct" if it matches the ground truth: PvP, the reported cell
+   centre within 0.4 addition voltages of the true (1,1) centre; PvT, the operating point holds
+   one electron where electrons load cleanly; tiebar, both triple points within 0.3 tie-bar
+   lengths of the true ones.
 Runs in a scratch workspace so your real workspace is not polluted.
 """
 import argparse
@@ -22,11 +25,13 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from chargecell import schema, virtual  # noqa: E402
+from chargecell import kinds, schema, virtual  # noqa: E402
 from chargecell.analysis.decide import analyze  # noqa: E402
 from chargecell.config import DeviceConfig  # noqa: E402
 from chargecell.schema import Scan  # noqa: E402
 from chargecell.simulate.generator import generate_sample  # noqa: E402
+from chargecell.simulate.pvt import generate_pvt_sample  # noqa: E402
+from chargecell.simulate.tiebar import generate_tiebar_sample  # noqa: E402
 from chargecell.storage import Workspace  # noqa: E402
 
 G = ["P1", "P2", "P3"]
@@ -45,18 +50,15 @@ def main():
     ws = Workspace(tempfile.mkdtemp(prefix="cc_eval_"))
     shutil.copytree(src, ws.model_dir(src.name), dirs_exist_ok=True)
     ws.set_active_model(src.name)
-    ws.save_device(DeviceConfig(name="sim", safe_limits={}, max_step=10.0))
+    kind = Workspace.model_kind(json.loads((src / "model.json").read_text()))
+    ws.save_device(DeviceConfig(name="sim"))
 
     rng = np.random.default_rng(a.seed)
     conf = np.zeros((3, 3), int)
     review = 0
     t0 = time.time()
     for _ in range(a.n):
-        s = generate_sample(rng)
-        r, w, t = s["render"], s["window"], s["truth"]
-        scan = Scan(signal=r["signal"], x=r["x"] / 1e3, y=r["y"] / 1e3, x_gate=G[w.pair[0]],
-                    y_gate=G[w.pair[1]], device="sim", fast_axis=w.fast_axis,
-                    voltage_state={G[w.spectator]: w.v_spectator / 1e3})
+        scan, t = held_out_scan(kind, rng)
         res = analyze(ws, scan)
         conf[schema.STATUSES.index(t["status"]), schema.STATUSES.index(res["status"])] += 1
         review += res["needs_review"]
@@ -67,11 +69,28 @@ def main():
         flagged_for_review=round(review / a.n, 3), confusion_rows_true_cols_pred=conf.tolist(),
         labels=schema.STATUSES, seconds_per_scan=round((time.time() - t0) / a.n, 3))))
     if a.nav:
-        nav = virtual.evaluate_navigation(ws, n_devices=a.nav, max_scans=a.max_scans, seed=77)
+        nav = virtual.evaluate(ws, kind, n_devices=a.nav, max_scans=a.max_scans, seed=77)
         print("NAV", json.dumps({k: v for k, v in nav.items() if k != "results"}))
         for x in nav["results"]:
             print(" ", x["device"], "scans:", x["scans"], "correct:", x["correct"],
-                  [(t["status"][:5], t["truth"][:5]) for t in x["trail"]])
+                  [(t["status"][:5], t["reason"], t["truth"][:5], t["truth_reason"])
+                   for t in x["trail"]])
+
+
+def held_out_scan(kind: str, rng) -> tuple[Scan, dict]:
+    """A fresh simulated scan of the given kind, as a measurement backend would send it."""
+    if kind == "PvT":
+        s = generate_pvt_sample(rng)
+        r, w, t = s["render"], s["window"], s["truth"]
+        P, T = G[w.dot], "T1" if w.dot == 0 else "T2"
+        vs = {g: v / 1e3 for g, v in zip(G, w.v_plungers) if g != P}
+        return Scan(signal=r["signal"], x=r["x"] / 1e3, y=r["y"] / 1e3, x_gate=P, y_gate=T,
+                    kind="PvT", device="sim", fast_axis=w.fast_axis, voltage_state=vs), t
+    s = (generate_tiebar_sample if kind == "tiebar" else generate_sample)(rng)
+    r, w, t = s["render"], s["window"], s["truth"]
+    return Scan(signal=r["signal"], x=r["x"] / 1e3, y=r["y"] / 1e3, x_gate=G[w.pair[0]],
+                y_gate=G[w.pair[1]], kind=kind, device="sim", fast_axis=w.fast_axis,
+                voltage_state={G[w.spectator]: w.v_spectator / 1e3}), t
 
 
 if __name__ == "__main__":

@@ -5,30 +5,38 @@ The high-level design and rationale are in `DESIGN.md`; this file is the develop
 
 ```
 chargecell/
-  schema.py            core types and vocabularies (Scan, statuses, reasons, line families)
-  config.py            DeviceConfig (safe limits, step sizes, priors, virtual gates)
+  schema.py            core types and vocabularies (Scan, statuses, PvP reasons, line families)
+  kinds.py             scan kinds (PvP, PvT, tiebar): reasons, line families, network heads
+  config.py            DeviceConfig (all optional: gate roles, safe limits, steps, priors, calibrations)
+  units.py             voltage formatting that follows the size of the value
   storage.py           Workspace: plain-folder persistence (JSON + npz)
   preprocess.py        resampling, network input features, line-mask packing
   quality.py           classical pre-model checks (hard fails, noise, clipping)
   labels.py            annotation format <-> dense labels; status suggestion; model drafts
   simulate/physics.py  triple-dot constant-interaction + tunnel-coupling model, sensor dot
-  simulate/generator.py device/window/artefact sampling, rendering, oracle labels
+  simulate/generator.py device/window/artefact sampling, rendering, oracle labels (PvP)
+  simulate/pvt.py      plunger-vs-tunnel-gate scans: reservoir rate, latching, broadening, labels
+  simulate/tiebar.py   (1,1)-(2,0) zooms: windows, triple points, coupling truth, labels
   model/unet.py        ChargeCellNet (multi-head U-Net)
   model/dataset.py     synthetic shard building, real-label arrays, group split, torch Dataset
   model/train.py       TrainConfig, ensemble training, calibration, metrics, model cards
   model/infer.py       Grid (index <-> volts), canonical input, Analyzer (cached ensemble)
   analysis/decide.py   quality gate + ensemble + FOUND gates -> decision, keypoints, overlays
   analysis/lattice.py  transition-line lattice from occupancy / line maps
-  analysis/recommend.py next-scan guidance, safety, device history, spectator check
+  analysis/recommend.py next-scan guidance, safety, device history, spectator check (+ shared
+                       helpers: finalize_window, widen_if_revisited, common_fix)
+  analysis/pvt.py      PvT decision, loading lines, clean tunnel band, operating point, guidance
+  analysis/tiebar.py   tie-bar decision, triple points, measured coupling, readout point, guidance
   importers/generic.py load_any(): .json (protocol request or plain)/.npz/.csv dispatch
   protocol.py          chargecell/1 request/response models, analysis -> response, handlers
   client.py            stdlib-only HTTP client and request builder for measurement code
-  virtual.py           practice devices; closed-loop navigation evaluation
+  virtual.py           practice devices (P, X, T gates; any kind); closed-loop evaluation per kind
   jobs.py              background JobManager (one worker thread)
   server/app.py        FastAPI app (create_app) behind the GUI
   server/static/       index.html, style.css, plot.js, app.js (no build step)
   cli.py, __main__.py  command line
-tests/                 conftest (OracleAnalyzer), test_core, test_guidance, test_api
+tests/                 conftest (OracleAnalyzer), test_core, test_guidance, test_api,
+                       test_protocol, test_kinds
 scripts/               train_starter, eval_model, nav_trace, gui_check
 ```
 
@@ -36,7 +44,14 @@ scripts/               train_starter, eval_model, nav_trace, gui_check
 
 - **Units.** Scans and all public APIs use **volts**. The simulator works internally in
   **mV** (`simulate/*`, `Window.x0` etc.). `virtual.py` converts at the boundary. The GUI
-  displays mV.
+  displays mV; operator text uses `units.fmt_*` (the unit follows the size of the value).
+- **No voltage scale.** Nothing may assume a device's voltage scale. `DeviceConfig` voltage
+  settings are optional; guidance falls back to spacings measured in the scans (or earlier scans)
+  and to fractions of the window (`step_limit`, `barrier_step_for`). Practice devices have a
+  random overall scale, so the oracle benchmarks catch accidental absolute constants.
+- **Scan kinds** (`kinds.py`): `PvP`, `PvT`, `tiebar`, one model each (active model per kind).
+  PvT: x = plunger, y = its tunnel gate (analysis transposes otherwise; index j increases toward
+  faster tunnelling). Tie bar: PvP axes, the (1,1)-(2,0) transition with two electrons in dot A.
 - **Scan orientation.** `Scan.signal` is `(ny, nx)`; `x` and `y` are ascending (the
   constructor flips axes and signal if needed). `x_gate` is horizontal, "dot A";
   `y_gate` is vertical, "dot B". The spectator is the third plunger.
@@ -45,27 +60,30 @@ scripts/               train_starter, eval_model, nav_trace, gui_check
   carrier)` maps index to volts. For holes `dx, dy < 0` (flipped). **All analysis geometry
   (lattice, targets, windows) is computed in index space and converted with `Grid.to_volts` /
   `to_index` at the end.** This is why hole devices need no special cases downstream.
-- **Line families** (`schema.LINE_FAMILIES`): `a` (dot A reservoir lines, near-vertical),
+- **Line families** (PvP: `schema.LINE_FAMILIES`; other kinds: `kinds.py`): `a` (dot A reservoir lines, near-vertical),
   `b` (dot B, near-horizontal), `interdot`, `spectator`, `sensor` (the sensor's own Coulomb
   peaks: artefacts, not charge transitions).
 - **Occupancy classes**: 0..4 where 4 means ≥ 4 (`N_OCC_CLASSES = 5`); `OCC_IGNORE = -1`
   marks pixels excluded from the loss (unknown offsets).
-- **Statuses**: `FOUND`, `NOT_IN_WINDOW`, `UNINTERPRETABLE`. **Reasons** are in a fixed order
-  (the network head depends on it; never reorder, only append and retrain):
+- **Statuses**: `FOUND`, `NOT_IN_WINDOW`, `UNINTERPRETABLE` (all kinds). **Reasons** are per
+  kind (`kinds.KINDS[k].reasons`) and in a fixed order (the network head depends on it; never
+  reorder, only append and retrain). PvP:
   `none | no_transitions, occupancy_too_low, no_reference, partially_visible |
   low_snr, sensor_insensitive, dots_merged, charge_instability, resolution_too_coarse`.
   `NOT_IN_WINDOW_REASONS = REASONS[1:5]`, `UNINTERPRETABLE_REASONS = REASONS[5:]`.
-- **Anchoring ("ref")**: a dot is anchored when its empty (n = 0) region is visible, so absolute
-  electron numbers are known. FOUND requires both dots anchored.
+- **Anchoring ("ref")**: a dot is anchored when its empty (n = 0) region is visible over more
+  than an occupied cell could span (`ANCHOR_WIDTH` = 1.3 addition voltages), so absolute electron
+  numbers are known. FOUND requires both dots anchored (PvP) or the dot anchored (PvT).
 
 ## 2. Data contracts
 
 ### Scan (`schema.Scan`, dataclass)
-`signal, x, y, x_gate, y_gate, id, device, cooldown, kind ("PvP"), voltage_state (gate -> V),
+`signal, x, y, x_gate, y_gate, id, device, cooldown, kind (PvP | PvT | tiebar), voltage_state (gate -> V),
 fast_axis (inner sweep loop), source (file|api|synthetic|virtual_device), created,
 units, notes, extra`. `meta()` / `from_meta()` round-trip through `meta.json`.
-Practice-device scans keep ground truth in `extra["truth"]` (status, reason, target_V,
-spectator_occupancy). The server strips it from `GET /api/scans/{id}` and serves it only via
+Practice-device scans keep ground truth in `extra["truth"]` (status, reason, and per kind:
+target_V and spectator_occupancy; T_open_V, T_broad_V, operating_point_V; tp_low_V, tp_high_V,
+readout_V, length_V, coupling_ratio, tc_meV). The server strips it from `GET /api/scans/{id}` and serves it only via
 `/truth`.
 
 ### Workspace layout (`storage.Workspace`)
@@ -77,8 +95,8 @@ scans/<id>/annotation.json           current label
 scans/<id>/annotation_history/<stamp>_<annotator>.json   every save (audit trail)
 scans/<id>/analysis.json             latest analysis result
 synthetic/<name>/manifest.json + shard_###.npz + shard_###.json (per-sample meta)
-models/<id>/model.json + member_<k>.pt
-models/ACTIVE                        active model id
+models/<id>/model.json + member_<k>.pt   (weights of bundled models are in Git LFS)
+models/ACTIVE, models/ACTIVE_<kind>  active model id per scan kind (ACTIVE = PvP)
 virtual_devices/<id>.json            practice device parameters and state
 jobs/<id>.json                       job records
 ```
@@ -100,24 +118,32 @@ crossed. `suggest_status` derives a status and reason from the drawn geometry (e
 0.25). `annotation_from_prediction` turns a model prediction into an editable draft. The
 round trip truth -> polylines -> dense agrees on ~99% of pixels.
 
-### Synthetic shards (`model/dataset.py: sample_to_arrays`)
-Per sample, at `size x size`: `signal` float16; `occ` int8 (2, S, S) for [a, b] clipped to 4;
-`lines` uint8 bitmask (one bit per family, `preprocess.pack_lines`); `status`, `reason` int8
-indices; `ref` int8 (2,). Per-sample meta (json) includes status, reason, ref flags, vis_frac,
+### Synthetic shards (`model/dataset.py: sample_to_arrays`, `simulate/pvt.pvt_to_arrays`, `simulate/tiebar.tiebar_to_arrays`)
+Per sample, at `size x size`: `signal` float16; `occ` int8 (H, S, S), the kind's class heads in
+order (PvP: electrons in a, b clipped to 4; PvT: electrons (-1 where electrons cannot follow),
+tunnel regime 0 slow / 1 good / 2 open (-1 on rows without a transition); tiebar: region 0 (1,1)
+/ 1 (2,0) / 2 (1,0) / 3 (2,1) / 4 other); `lines` uint8 bitmask (one bit per family of the kind,
+`preprocess.pack_lines(masks, families)`); `status`, `reason` int8 indices (reason into the
+kind's list); `ref` int8 (n_ref,). The manifest records `kind`. Per-sample meta (json) includes status, reason, ref flags, vis_frac,
 snr, spectator_occ, target_mV, spacing_mV, pair, window_mV, native_shape, fast_axis, artifact,
 geometry.
 
 ### Network input and outputs
 `preprocess.features(sig)` gives (3, S, S): robust z-scored signal (clipped ±6), then x- and
 y-gradients of a σ = 0.8 Gaussian-smoothed copy (scaled by the 99th percentile, clipped ±3).
-`ChargeCellNet`: dense head (2·5 occupancy logits + 5 line logits) and global head (3 status +
-10 reason + 2 ref), built from bottleneck and decoder pooled features.
+`ChargeCellNet(kind=...)`: dense head (the kind's class-head logits, then one logit per line
+family) and global head (3 status + the kind's reasons + n_ref), built from bottleneck and
+decoder pooled features. PvP: 2·5 + 5 dense, 3 + 10 + 2 global (the original layout, so old
+PvP weights load unchanged). Heads are defined in `kinds.py`; **never reorder a kind's reasons or
+line families** (append, then retrain).
 
 ### Prediction dict (`Analyzer.predict`)
 `status_p (3,)` ensemble mean; `status_members (M,3)`; `reason_p (10,)`; `ref_p (2,)`;
-`occ_a_p, occ_b_p (5,S,S)`; `lines_p (5,S,S)`; `mutual_info` (ensemble disagreement on status);
-`occ_entropy`; `signal_canonical (S,S)`. `tests/conftest.py: truth_to_prediction` builds the
-same dict from simulator truth. Keep them in sync.
+`<head>_p` per class head (PvP `occ_a_p, occ_b_p (5,S,S)`; PvT `occ_p (5,S,S), regime_p
+(3,S,S)`; tiebar `region_p (5,S,S)`); `lines_p (F,S,S)`; `mutual_info` (ensemble disagreement on
+status); `occ_entropy`; `signal_canonical (S,S)`. `tests/conftest.py: truth_to_prediction`,
+`pvt_truth_to_prediction` and `tiebar_truth_to_prediction` build the same dicts from simulator
+truth. Keep them in sync.
 
 ### Model card (`models/<id>/model.json`)
 `id, created, config (TrainConfig), architecture (+params), found_threshold, calibrated_on
@@ -128,8 +154,14 @@ history (per member per epoch), uncertainty_threshold` (90th percentile of valid
 information).
 
 ### Analysis result (`analysis/decide.analyze`, saved as analysis.json)
+`analyze()` dispatches on `scan.kind`. PvT and tiebar results share the top-level keys below
+(kind, status, reason, reason_text, demotion, confidence, needs_review, model_id,
+found_threshold, probabilities, uncertainty, recommendation, overlays{size, x_gate, y_gate,
+extent}) and add `features` (protocol-ready keypoints), `keypoints` (PvT: operating_point,
+tunnel_gate_clean_from/_to; tiebar: tp_low, tp_high, tiebar_mid, readout) and, for tiebar,
+`coupling`. PvT results also carry `transposed` (the scan had the tunnel gate on x). PvP:
 ```
-scan_id, created, quality, scan{x_gate,y_gate,device},
+scan_id, created, kind, quality, scan{x_gate,y_gate,device},
 status, reason, reason_text, ref[2], cell{area_fraction, edge_fraction, centroid_idx,
 centroid_v{gate:V}, polygon_v[[x,y]], range_v{gate:[lo,hi]}} | null,
 keypoints{cell_centre, readout_20, readout_02 : {gate:V}},
@@ -148,7 +180,9 @@ recommendation{...see below}, overlays{size, extent[x_i0,x_iS,y_j0,y_jS], occ_co
 `confidence: high|medium|low`, `basis`, `target{gate:V}`,
 `next_window{x_gate, y_gate, x:[start,stop,n], y:[...]}` (absolute V; for a split move this is
 the first step), `move{gate:ΔV}` (window-centre change, or a barrier change for merged dots),
-`physical_moves` (virtual gates), `tiebar_window` (FOUND), `warnings[]`,
+`physical_moves` (virtual gates), `tiebar_window` (PvP FOUND: take a tie-bar scan there),
+`retune_window` (tiebar FOUND with a coupling outside the target; `move` then holds the
+exchange-gate change), `warnings[]`,
 `spacing_v{gate}`, `spacing_source{gate: "measured in this scan" | "from earlier scans on this
 device" | "device prior" | "unknown"}`.
 
@@ -235,24 +269,33 @@ and `model/dataset.real_arrays` skips them. **Change the protocol additively** (
 fields, enum values) or bump to chargecell/2.
 
 ### virtual.py
-Practice devices use plungers P1, P2, P3 (dots 0, 1, 2). `create` starts at a random offset
-of −2.5…+3 addition voltages from (1,1,1) and writes a DeviceConfig with a ±30% prior.
-`measure` renders at SNR U(4, 25) with no charge jumps, updates the device's DC point to the
-window centre, and stores the truth. `evaluate_navigation` starts from a 90 mV, 90-point window.
+Practice devices use plungers P1, P2, P3 (dots 0, 1, 2), exchange gates X1 (P1-P2) and X2 (P2-P3)
+and tunnel gates T1 (dot 0) and T2 (dot 2). `create` scales the whole device by a random factor
+(addition voltages from a few mV to a few hundred mV), starts the plungers −2.5…+3 addition
+voltages from (1,1,1), the tunnel gates in (``tuned``) or below the clean band, and writes a
+DeviceConfig with a ±30% spacing prior and safe limits (both optional, ``prior``/``limits``).
+`device_state(vd, voltage_state)` applies the X gates (interdot coupling, exponential in X, and
+small shifts) and the T gates (dot shifts, and latching of the edge dots in plunger scans) and
+moves `v11` with them. `measure(..., kind)` renders PvP, tiebar (two plungers) or PvT (a plunger
+and its tunnel gate, either way round) at SNR U(4, 25), updates the DC point and stores the
+truth; `simulate_clean` re-renders it noise-free for the oracle. `evaluate(ws, kind, ...)` runs
+the closed loop per kind (`evaluate_navigation` = PvP) and judges each FOUND against the truth
+(`_found_is_right`, `pvt_found_is_right`, `tiebar_found_is_right`). Start windows are three
+typical spacings (`start_window`); tie-bar runs start near the true tie bar (`_tiebar_start`).
 
 ## 4. HTTP API (`server/app.py`)
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/status` | workspace, active model, counts, devices, running jobs |
+| GET | `/api/status` | workspace, active model (PvP), active_models (per kind), counts, devices, running jobs |
 | GET | `/api/scans?device=&labelled=yes|no&source=` | scan summaries (newest first) |
-| POST | `/api/scans/import` | multipart `files[]` + x_gate, y_gate, device, cooldown, axis_units, notes |
+| POST | `/api/scans/import` | multipart `files[]` + x_gate, y_gate, device, cooldown, axis_units, notes, kind |
 | GET/PATCH/DELETE | `/api/scans/{id}` | scan (signal as base64 float32 LE) / edit meta / delete |
 | GET | `/api/scans/{id}/truth` | practice-device ground truth |
 | GET/PUT/DELETE | `/api/scans/{id}/annotation` | label (+ preview occ_code on the scan grid and suggestion) |
 | POST | `/api/scans/{id}/annotation/preview` | preview without saving |
 | POST | `/api/scans/{id}/draft_from_model` | annotation draft from the model |
-| GET | `/api/label_queue` | unlabelled scans, most uncertain first |
+| GET | `/api/label_queue` | unlabelled PvP scans, most uncertain first |
 | POST/GET | `/api/scans/{id}/analyze`, `/analysis` | run / fetch analysis (404 if none) |
 | GET | `/api/v1/scans/{id}/response?download=` | saved analysis as a chargecell/1 response |
 | POST | `/api/v1/analyze` | chargecell/1 request -> response (422 invalid, 409 no model) |
@@ -260,13 +303,13 @@ window centre, and stores the truth. `evaluate_navigation` starts from a 90 mV, 
 | GET | `/api/v1/schema` | JSON Schemas of request and response |
 | POST | `/api/analyze_all?only_new=true` | job |
 | GET / PUT | `/api/devices`, `/api/devices/{name}` | device configs (validated by pydantic) |
-| GET/POST | `/api/synthetic` | list / generate (job) |
+| GET/POST | `/api/synthetic` | list / generate (job; body includes `kind`) |
 | GET/DELETE | `/api/synthetic/{name}/preview?n=&offset=`, `/api/synthetic/{name}` | thumbnails / delete |
-| GET | `/api/models` | model cards (+active flag) |
-| POST | `/api/models/{id}/activate`, `/api/train` | activate / train (job; body = TrainConfig fields) |
+| GET | `/api/models` | model cards (+kind, +active flag per kind) |
+| POST | `/api/models/{id}/activate`, `/api/train` | activate (for its kind) / train (job; body = TrainConfig fields incl. `kind`; datasets must match kind and size) |
 | GET/POST | `/api/jobs`, `/api/jobs/{id}`, `/api/jobs/{id}/cancel` | job status / cancel |
-| GET/POST | `/api/virtual`, `/api/virtual/{vd}/measure` | practice devices (create also takes the first scan) |
-| POST | `/api/scans/{id}/run_next?window=` | practice mode: measure the recommended window and analyse |
+| GET/POST | `/api/virtual`, `/api/virtual/{vd}/measure` | practice devices (create takes the first scan of body `kind`; measure takes `kind`) |
+| POST | `/api/scans/{id}/run_next?window=next_window|tiebar_window|retune_window` | practice mode: apply gate changes, measure the recommended window (as a tiebar scan for the last two) and analyse |
 | GET | `/`, `/static/*`, `/api/docs` | GUI, assets, OpenAPI docs |
 
 ## 5. GUI (`server/static`)
@@ -287,7 +330,11 @@ numerals.
   `build()` (once) and `enter(arg)` (on every route). Routing is by hash `#/<page>/<scanId>`.
   `pollStatus` runs every 1.5 s (job indicator, model indicator, refresh on job completion).
   `S.pendingDraft` makes "Correct in labeller" open the Label page with a model draft loaded.
-  The annotator name is kept in localStorage (`cc-annotator`).
+  The annotator name is kept in localStorage (`cc-annotator`). Scan kinds: `KIND_LABEL`,
+  `statusLabel(kind, status)`; `drawFeatures` draws PvT/tie-bar keypoints (points are gate -> V,
+  polylines are on the analysis axes and swapped when a PvT analysis was transposed); `onAxes`
+  maps a recommended window onto the scan's own axes by gate name. The Label page and label queue
+  handle PvP scans only; `practiceButtons()` creates a practice device for a chosen kind.
 - Labeller: tools V/A/B/S/E; click adds points; double-click or Enter finishes (trailing
   near-duplicate points are dropped); Alt-click inserts; right-click deletes a point; Backspace;
   Ctrl+Z/Shift+Z undo stack of JSON snapshots; live preview is debounced 180 ms. Saving FOUND
@@ -306,3 +353,9 @@ numerals.
   mode.
 - `test_api.py`: the whole GUI workflow over HTTP; training smoke test (48 scans, 32 px,
   1 epoch).
+- `test_kinds.py`: PvT and tie-bar simulators and labels, coupling truth grows with t_c, the
+  fitted interdot width matches the physics, oracle closed loops for PvT (no priors or limits)
+  and tie bar, PvT axes either way round, tiny training runs per kind (per-kind active model),
+  and protocol responses with the new feature types.
+- Guidance benchmarks outside pytest: `scripts/nav_trace.py --oracle --bench --kind PvP|PvT|tiebar
+  [--no-prior] [-v]` (30 devices).

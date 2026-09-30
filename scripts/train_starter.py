@@ -7,7 +7,7 @@
 One model per scan kind (PvP, PvT, tiebar). With --bundle the finished model is copied to
 chargecell/assets/models/<id>/, replacing any bundled model of the same kind, so it ships with
 the package (the weights are stored with Git LFS). Evaluate before bundling:
-scripts/eval_model.py (PvP) and scripts/eval_kind.py (PvT, tiebar).
+scripts/eval_model.py (any kind).
 """
 import argparse
 import shutil

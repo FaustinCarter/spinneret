@@ -15,6 +15,46 @@ September 2026; re-check anything time-sensitive.
 Context: IBM announced an agreement to acquire HRL Laboratories on 23 July 2026, so HRL's
 publication and open-source plans may change.
 
+### HRL's tune-up pipeline in detail (QPU paper, Supplement S5 and Fig. S20; read 2026-09-30)
+
+- Flow per qubit: sensor (Z-gate pinch-off, tune-DCS on M), electron loading, spin-to-charge
+  conversion, exchange-axis calibration.
+- **PvT** (plunger versus tunnel gate) "displays electron loading lines as identified by a CNN".
+  T gates couple the reservoirs (accumulated by B gates) to the dots; PvT scans are how one
+  electron is loaded under each plunger and how reservoir tunnel rates are set.
+- **PvP** "reveals charge stability cells as identified by a CNN. The idle operating voltage
+  setpoint is automatically updated to the center of the (1,1) charge cell."
+- **Tiebar**: "a PvP experiment zoomed-in on the (1,1)-(2,0) charge transition", evaluated with
+  a CNN that "provides a rough measure of interdot tunnel coupling and an initial guess of the
+  spin-to-charge measurement coordinates". The same paper calls the charge transition traversed
+  by slow initialization ramps "the tie bar".
+- Each CNN is trained on thousands of human-labelled data sets and outputs a graph of keypoints
+  (relational network, attention decoder, MLP + RGCN heads for keypoints and their links).
+- Tune-up actions form an automation tree (depth-first order, each node graded when it runs;
+  trees from many runs are mined for success rates and failure modes).
+- Gate families on the 54-dot chip: P (plungers), X and Y (exchange), T (reservoir tunnel),
+  B (reservoir bath), M and Z (sensors), S (SPAM). All DC biases were below 1.0 V there, a limit
+  of the cryo-controller; ChargeCell does not assume it.
+
+### Parameters used for the PvT and tie-bar simulators (scale-free)
+
+- Interdot tunnel coupling is exponential in the barrier (exchange) gate voltage; Mills et al.,
+  "Computer-automated tuning procedures for semiconductor quantum dot arrays" (arXiv:1907.10775)
+  report e-folding voltages of 25-33 mV in Si/SiGe, target t_c ~ 12 µeV, >= 20 µeV for shuttling,
+  electron temperature ~55 mK, lever arm ~0.2. Simulated t_c spans 2 µeV to 0.3 E_m.
+- Charge-transfer width across the interdot transition (DiCarlo et al. 2004 form, polarisation
+  eps/Omega tanh(Omega/2kT), Omega = sqrt(eps^2 + 4 t_c^2)): FWHM of the derivative is 3.07 t_c
+  for t_c >> kT and 3.53 kT for t_c << kT. ChargeCell reports FWHM / tie-bar length (both in
+  volts), which is voltage-scale free, and converts to µeV only with user-supplied lever arms.
+- Reservoir tunnel rates depend exponentially on the tunnel gate. The simulator draws the gate
+  voltage per decade of rate as 0.2-1.2 plunger addition voltages, the T-to-plunger lever-arm
+  ratio as 0.2-0.7 (tilted loading lines), and the distance from "electrons follow the sweep"
+  (Gamma tau = 1) to lifetime broadening (hbar Gamma = kT) as log10(kT tau / hbar) = 4.5-7
+  decades (microsecond-to-millisecond pixels at 50-300 mK).
+- Everything is drawn relative to each dot's addition voltage, and practice devices get a random
+  overall voltage scale (addition voltages from a few mV to a few hundred mV), so nothing depends
+  on one technology's voltages.
+
 ### Implications that were adopted
 - **Counting needs an anchor.** A pairwise (1,1) is really (1,1,N₃), and without the empty
   region the count is unknown. FOUND requires both dots anchored.
@@ -28,10 +68,13 @@ publication and open-source plans may change.
 - The outcome + reason + keypoints output is in the spirit of HRL's keypoint graphs and node
   grades.
 
-### Proposed but not built (see HANDOFF §4.5)
+- PvT and tie-bar models (built 2026-09-30, see DESIGN §10): separate models per scan kind as
+  in HRL's pipeline, with keypoints (loading lines, operating point, triple points, tie bar,
+  readout point) in the protocol response.
+
+### Proposed but not built (see HANDOFF)
 - A `FOUND_SPECTATOR_UNVERIFIED` status and cross-pair consistency (P1–P2, P2–P3, P1–P3).
-- PvT and tiebar models; keypoints for triple points and interdot endpoints.
-- An automation tree / action log.
+- An automation tree / action log (next on the user's list).
 - A simulator backend comparison with QDarts (finite tunnel coupling, non-constant charging
   energies, sensor dots) or qarray.
 - Reservoir-starved interior dots (missing or slow reservoir lines) in simulation.

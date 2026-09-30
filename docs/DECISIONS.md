@@ -61,3 +61,49 @@ Each entry: the decision, why, and what would change it. Newest last.
 
 14. **Practice devices** (simulated) in the GUI, for operator training and as the end-to-end
     test harness for guidance (`evaluate_navigation`).
+
+## Decisions of 2026-09-30 (second session)
+
+15. **One model per scan kind, one architecture.** HRL runs separate CNNs for PvT, PvP and tie-bar
+    scans; ChargeCell does the same with one U-Net whose heads come from `kinds.py`. Each kind
+    has its own datasets, model versions, calibrated threshold and active model. PvP keeps its
+    original layout, so older PvP weights still load.
+
+16. **No voltage scale anywhere** (user's instruction). Device settings with voltages are all
+    optional and empty by default; guidance falls back to spacings measured in the scans, the
+    device's history, and fractions of the window (one window per move, a quarter spacing for an
+    exchange-gate step). Practice devices use a random overall voltage scale so the oracle
+    benchmarks catch any absolute constant. Operator text picks units from the value's size.
+
+17. **Anchoring needs more than a cell of empty region.** The first trained PvP model made wrong
+    FOUND calls exactly two spacings off: the training labels had called a dot anchored when a
+    line-free strip of 0.25 spacings was visible, which is indistinguishable from an occupied
+    cell cut off by the window. Labels now need 1.3 spacings (the widest occupied cell is about
+    1.25), target windows include that much, and a geometric FOUND gate checks it at analysis
+    time independently of the network.
+
+18. **A demoted FOUND stays readable.** FOUND and NOT_IN_WINDOW both mean the scan is readable, so
+    a FOUND that fails a check becomes UNINTERPRETABLE only when the network gives that more
+    than 50%. The old rule compared the two leftovers (0.06 vs 0.02 for a 0.92 FOUND) and sent
+    readable scans to "fix and rescan" loops.
+
+19. **The tie-bar coupling is measured, not predicted.** The network only locates the tie bar and
+    triple points; the width of the charge transfer is fitted on the raw signal and reported as
+    a voltage-free ratio (width / tie-bar length), and in µeV only when the user supplies lever
+    arms and electron temperature. It is checked against the simulator's physics in the tests.
+
+20. **PvT: tunnel regime per pixel, tunnel gate first.** The PvT network predicts slow / good /
+    open tunnelling per pixel (supervised on rows that contain a transition) besides electrons
+    and lines. When more than 60% of the window is too slow or too open, fixing the tunnel gate
+    takes priority over plunger moves, because loading lines seen in a few rows cannot be
+    trusted to steer the plunger.
+
+21. **Practice devices model the T and X gates.** Tunnel gates set the edge dots' reservoir
+    rates (and latching in plunger scans), exchange gates set the interdot coupling. This makes
+    the whole PvT → PvP → tie-bar sequence practisable and testable in closed loop, with each
+    FOUND judged against the ground truth for its kind.
+
+22. **User choices recorded:** keep the name ChargeCell inside the spinneret repository; train
+    here on CPU (PvP at 96 px, 3 members); bundled weights in Git LFS; no license for now;
+    advisory only (ChargeCell never moves gates; automation lives in the backend); spinQICK
+    removed; next priorities after this: PvT/tie-bar models (done), then the automation tree.

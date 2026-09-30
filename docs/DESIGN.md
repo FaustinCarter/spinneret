@@ -2,12 +2,28 @@
 
 ## 1. The problem
 
+ChargeCell follows HRL's tune-up of exchange-only qubits, which uses three kinds of
+charge-stability scan, each read by its own model (HRL QPU paper, Supplement S5):
+
+1. **PvT** (plunger vs the tunnel gate to its reservoir): load one electron under an edge
+   plunger, with the tunnel gate where electrons load cleanly (section 8).
+2. **PvP** (plunger vs plunger): find the (1,1) cell of a pair (this section and sections 3-7).
+3. **Tie bar** (PvP zoomed on the (1,1)-(2,0) transition): triple points, a rough interdot
+   tunnel coupling, a first spin-to-charge readout point (section 9).
+
+**No voltage scale is assumed.** Voltages vary widely between devices and technologies. The
+networks see normalised images; guidance measures spacings from the scans themselves, uses the
+operator's settings only when given, and otherwise sizes moves as fractions of the window.
+
 A plunger-vs-plunger charge stability diagram of dots A and B is a honeycomb of cells, each with a
 fixed electron number (n_A, n_B). The goal is the (1,1) cell. Two facts shape the design:
 
 - **Counting needs an anchor.** Cells look alike, so (1,1) can only be named with certainty when
   the empty region (n = 0) is visible for both dots. Without it, the best possible answer is "not
-  in this window; move toward fewer electrons". ChargeCell treats this as a hard rule.
+  in this window; move toward fewer electrons". ChargeCell treats this as a hard rule. The
+  empty region must be wider than any occupied cell (1.3 electron spacings): a narrower line-free
+  strip at the edge could be an occupied cell cut off by the window, and the first trained model
+  learned to guess there (section 11).
 - **Guidance needs geometry, not just a label.** To tell the operator where to go, the tool must
   measure the transition lines (position, spacing, tilt) and extrapolate.
 
@@ -80,6 +96,11 @@ labels) agrees with ground truth on ~99% of pixels.
   "can't interpret" and asks for review. A missed FOUND costs one extra scan; a wrong FOUND can
   cost an experiment.
 
+**Other kinds.** PvT and tie-bar models use the same network with their own heads, defined in
+`chargecell/kinds.py` (PvT: electrons, tunnel regime, three line families, one anchor flag;
+tie bar: a five-class region map and five line families). Each kind has its own model versions,
+calibrated threshold and active model.
+
 **Why no foundation model.** Pretrained vision models (e.g. SAM, large pretrained backbones or
 vision-language models) were considered. Charge stability diagrams are small, single-channel,
 and governed by precise geometry; the hard part is counting from an anchor and extrapolating the
@@ -94,10 +115,16 @@ FOUND requires **all** of:
 1. outcome head's top class is FOUND, with probability ≥ the calibrated threshold;
 2. the anchor heads say the empty region is visible for both dots;
 3. the occupancy maps contain a (1,1) region larger than 0.5% of the window;
-4. at most 40% of that region's border is the window edge (not cut off).
+4. at most 40% of that region's border is the window edge (not cut off);
+5. the empty region is at least 1.3 electron spacings wide for both dots, measured on the
+   occupancy map against the 0→1 / 1→2 spacing in the same map (a geometric check that does not
+   trust the anchor heads).
 
-Otherwise the result is demoted to "not in window" or "can't interpret" and flagged for review.
-Hard quality failures (non-finite data, constant signal, tiny scans) skip the model.
+Otherwise the result is demoted and flagged for review. A demoted scan becomes "can't
+interpret" only if the network gives that more than 50%: FOUND and "not in window" both mean
+"readable", so a confident-but-unverified FOUND becomes "not in window" with the reason taken
+from the failed check. Hard quality failures (non-finite data, constant signal, tiny scans) skip
+the model.
 
 ## 7. Guidance (`chargecell/analysis/recommend.py`)
 
@@ -116,10 +143,18 @@ Everything is computed in the model's index grid and converted to volts at the e
 - **Device memory.** The last FOUND position for the same gate pair on the device beats blind
   exploration (with a warning that other gates may have moved since).
 - **Spacing.** Measured in this scan, else the median from earlier scans on the device, else the
-  configured prior. Measurements more than 2.5x away from the prior are rejected with a warning.
-  The window is sized to about 3.2 cells (so the empty region and the (2,0)/(0,2) neighbours are in
-  view) and never shrunk on an unmeasured spacing. Points are set to about 12 per addition voltage.
-- **Safety.** Windows are kept inside the device's safe limits. Moves larger than the step limit
+  optional configured prior. Measurements more than 2.5x away from the prior (or, without one,
+  from the median of at least two earlier measurements) are rejected with a warning. With only
+  one transition per dot in view and no known spacing, the next window keeps that transition in
+  view and is 1.5x wider, rather than guessing a voltage. Target windows are about 3.4 cells,
+  shifted toward the empty region so that more than a full cell of it is in view, and are never
+  shrunk on an unmeasured spacing. Points are set to about 12 per addition voltage.
+- **No circles.** A window that was already scanned without success is not proposed again: the
+  next scan covers both it and the present window. A window that could not be interpreted twice
+  is widened 1.5x. A large line-free region below the lowest transition is treated as the
+  probable empty region and kept in view.
+- **Safety.** Windows are kept inside the device's safe limits, when set (a warning says when
+  they are not). Moves larger than the step limit (the device's max step, else one window width)
   are cut to the limit, and the operator is told to rescan and re-analyse after each step.
 - **Fixes.** For "can't interpret", reason-specific instructions (sensor retune, barrier
   reduction by a configurable step, longer averaging, more points).
@@ -127,34 +162,78 @@ Everything is computed in the model's index grid and converted to volts at the e
   whether an earlier FOUND scan that swept the spectator's plunger contains its present voltage,
   and says so. This ignores cross-talk from gates moved since, so it is a consistency check only.
 
-## 8. Evaluation
+## 8. PvT scans (`simulate/pvt.py`, `analysis/pvt.py`)
+
+- **Physics.** The tunnel gate T shifts the dots through its own lever arms (strongest on the
+  edge dot), so loading lines are tilted: dP/dT = -(T lever / P lever), 0.2-0.7. The reservoir
+  rate is exponential in T: log10(Γτ) = (V_T - T_open)/β10 - γ(V_P - P_ref)/β10, with τ the time
+  per pixel. Below T_open electrons cannot follow the sweep: each pixel relaxes with probability
+  1 - exp(-Γτ) toward a sample of the equilibrium, and a sweep line starts where the previous one
+  ended, so transitions latch, move along the sweep and vanish. log10(kTτ/ħ) = 4.5-7 decades
+  above T_open, ħΓ exceeds kT and lifetime broadening smears the lines.
+- **Labels.** Electrons in the swept dot (ignored where electrons cannot follow), a per-pixel
+  tunnel regime (slow / good / open, on rows that contain a transition), loading, spectator and
+  sensor lines, one anchoring flag. Reasons: `no_transitions`, `occupancy_too_low`,
+  `no_reference`, `tunnel_rate_too_low`, `reservoir_too_open`, and the usual uninterpretable ones.
+  If more than 60% of the window is too slow (or too open), the tunnel gate is fixed first.
+- **Decision.** FOUND needs the calibrated threshold, the empty dot, and the 0→1 and 1→2 lines
+  traced over enough rows where electrons load cleanly.
+- **Keypoints.** Loading lines (fitted per electron on clean rows), the tunnel-gate range where
+  electrons load cleanly, and the one-electron operating point: 35% into that range, midway
+  between the first two lines.
+- **Guidance.** Too slow / too open: centre the tunnel gate on the clean band if one is visible,
+  else step by 0.6 / 0.5 of the window. No empty dot: move the plunger so the lowest visible line
+  sits 60% into the window. First line only: put it 25% into a 1.25x wider window. Nothing
+  visible: explore toward more electrons and a more open tunnel gate. Plunger moves follow the
+  measured tilt of the lines when the tunnel gate moves.
+
+## 9. Tie-bar scans (`simulate/tiebar.py`, `analysis/tiebar.py`)
+
+- **Physics.** The PvP simulator, zoomed on the (1,1)-(2,0) transition (dot A on x holds two),
+  with interdot coupling from 2 µeV (thermally limited) to 0.3 of the mutual charging energy,
+  the sensor retuned for the zoom and positioned to see charge move between the dots. Triple
+  points are located on a fine ground-state map (the spectator may change occupancy at a triple
+  point when mutual charging is strong).
+- **Labels.** A per-pixel region map (the four cells around the tie bar: (1,1), (2,0), (1,0),
+  (2,1), and "other") and a, b, tiebar, interdot and sensor lines. Reasons: `no_tiebar`,
+  `partially_visible`, and uninterpretable ones including `dots_merged` (coupling ratio above
+  0.6: the triple points are no longer distinct) and `low_snr` when the interdot step itself is
+  too faint.
+- **Decision.** FOUND needs the calibrated threshold, the (1,1)|(2,0) boundary, and both triple
+  points found where three regions meet, inside the window.
+- **Coupling is measured, not predicted.** The raw signal is sampled across the tie bar on its
+  central part and a step s(t) = a + b t + c tanh((t - t0)/w) is fitted; FWHM = 1.763 w. The
+  coupling ratio FWHM / tie-bar length is voltage-free (about 3 t_c / E_m). With lever arms and
+  electron temperature in the device settings, t_c ≈ sqrt(FWHM_E² - (3.53 kT)²) / 3.07 is also
+  given in µeV and GHz. Tested against the physics: within 35% of the true FWHM when resolved.
+- **Guidance.** Readout point: the tie-bar midpoint moved into (2,0) by max(1.5 FWHM, 0.25
+  length), at most 0.75 length. With a coupling target set, weak/strong coupling proposes an
+  exchange-gate step and a rescan. Tie bar cut off: follow it toward the missing triple point.
+  No tie bar: return to the (1,1)-(2,0) boundary of the last PvP FOUND on the pair, else zoom out.
+
+## 10. Evaluation
 
 - **Unit and integration tests** (`pytest`): simulator consistency, label round trip, file
   importers, the chargecell/1 protocol (parsing, HTTP, file mode, a practice device driven to
   (1,1) through the protocol alone), the full HTTP workflow the GUI uses, and a training smoke
   test.
-- **Guidance with perfect perception** (`tests/test_guidance.py`, using ground truth in place of
-  the network): >90% outcome agreement, anchored targets within 0.3 cell spacings (median),
-  >80% correct move direction when unanchored, and closed-loop navigation on 30 random devices:
-  30/30 reach the correct (1,1) cell, median 2.5 scans, 90th percentile 4.
-- **Starter model**: see section 9.
+- **Guidance with perfect perception** (`tests/test_guidance.py`, `tests/test_kinds.py`,
+  `scripts/nav_trace.py --oracle --bench --kind ...`, ground truth in place of the network) on
+  practice devices with random voltage scales, 30 devices per kind: PvP 30/30 (median 3 scans,
+  also 30/30 with no priors or limits), PvT 30/30 (median 2, half the devices start with the
+  tunnel gate too closed), tie bar 30/30 (median 1); every FOUND matches the ground truth.
+- **Starter models**: see section 11.
 
-## 9. Starter model
+## 11. Starter models
 
-Not finished yet (see `docs/HANDOFF.md` §4.1). The first training run (4000 simulated scans at
-64x64, base 16, 2 members x 8 epochs, about 108 s per epoch on one CPU core) was interrupted
-during the second member. The first member reached 0.72 validation outcome accuracy and 0.77
-per-pixel occupancy accuracy after 8 epochs, still improving. `scripts/train_starter.py`
-reproduces the run and `scripts/eval_model.py` measures the full decision pipeline and closed-loop
-navigation. Record the results here.
+STARTER_MODEL_RESULTS
 
-## 10. Limitations and next steps
+## 12. Limitations and next steps
 
-- The starter model has only seen simulations. Label real scans from at least two cooldowns and
-  retrain before trusting it on a new device.
-- Only plunger-vs-plunger scans are modelled. HRL's tune-up also uses plunger-vs-barrier
-  (tunnel-rate) and readout "tiebar" scans; each would get its own head or model, following the
-  same labelling and training pipeline.
+- The starter models have only seen simulations. Label real scans from at least two cooldowns and
+  retrain before trusting them on a new device.
+- The labeller draws PvP labels only; PvT and tie-bar scans can be stored with a status and
+  reason, and need keypoint labels (loading lines, triple points) before real data can train them.
 - The labelling tool assumes electron orientation (occupancy grows with voltage). Analysis supports
   hole devices; labelling them needs a flipped drawing convention.
 - The chargecell/1 protocol has only been exercised by the tests and practice devices, not yet by
